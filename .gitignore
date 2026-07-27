@@ -1,0 +1,25 @@
+# secrets & personal data
+.env
+
+# runtime output
+*.log
+applications*.csv
+apply-state-*.json
+*.png
+
+# saved browser sessions (contain logged-in cookies)
+.*-chrome-profile/
+.*-apply-profile/
+
+# resume / personal docs
+*.pdf
+
+# machine-specific launchers (contain absolute local paths)
+*.vbs
+
+# local tooling / scratch
+.claude/
+naukri_update/
+
+# deps
+node_modules/
