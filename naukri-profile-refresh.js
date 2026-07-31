@@ -6,8 +6,11 @@
  * Debug:   node naukri-profile-refresh.js login                           (visible Chrome window)
  *
  * Login is automatic: if the Naukri session is gone, it signs in with the
- * Google account below. State lives in the headline itself:
- * ends with "." → remove it, else add it.
+ * Google account below. State lives in the headline itself — trailing dots
+ * cycle each run: "" → "." → ".." → "" → ...
+ *
+ * Also re-uploads the resume PDF whenever the "Uploaded on" date shown on
+ * the profile is not today's date.
  */
 const { chromium } = require('playwright-core');
 const path = require('path');
@@ -20,6 +23,7 @@ const LOGIN_URL = `https://www.naukri.com/nlogin/login?URL=${PROFILE_URL}`;
 const PROFILE_DIR = path.join(__dirname, '.naukri-chrome-profile');
 const LOG_FILE = path.join(__dirname, 'naukri-refresh.log');
 const ERROR_SHOT = path.join(__dirname, 'naukri-refresh-error.png');
+const RESUME_PATH = path.join(__dirname, 'Ankit Baghel Resume.pdf');
 const LOGIN_MODE = process.argv[2] === 'login';
 
 const log = (msg) => {
@@ -120,7 +124,10 @@ async function googleLogin(ctx, page) {
     const textarea = page.locator('#resumeHeadlineTxt');
     await textarea.waitFor({ timeout: 15000 });
     const current = (await textarea.inputValue()).trimEnd();
-    const updated = current.endsWith('.') ? current.slice(0, -1) : current + '.';
+    // cycle trailing dots: "" → "." → ".." → "" → ...
+    const base = current.replace(/\.+$/, '');
+    const dots = current.length - base.length;
+    const updated = base + '.'.repeat(dots >= 2 ? 0 : dots + 1);
 
     await textarea.fill(updated);
     await page.getByRole('button', { name: /^save$/i }).first().click();
@@ -136,7 +143,34 @@ async function googleLogin(ctx, page) {
       throw new Error(`save did not stick — server headline is "${saved.slice(0, 60)}", expected "${updated.slice(0, 60)}"`);
     }
 
-    log(`OK: headline ${current.endsWith('.') ? 'dot removed' : 'dot added'} (verified) → "${updated.slice(0, 60)}"`);
+    const dotMsg = dots >= 2 ? 'dots cleared' : `dot ${dots + 1} added`;
+
+    // ---- resume re-upload: only when the profile's "Uploaded on" date isn't today ----
+    let cvMsg = 'cv up-to-date';
+    const d = new Date();
+    // matches "Jul 31, 2026" and "Jul 1, 2026" / "Jul 01, 2026"
+    const todayRe = new RegExp(`${d.toLocaleString('en-US', { month: 'short' })} 0?${d.getDate()}, ${d.getFullYear()}`);
+    const uploadedOn = await page
+      .getByText(/Uploaded on/i)
+      .first()
+      .innerText({ timeout: 10000 })
+      .catch(() => '');
+    if (!todayRe.test(uploadedOn)) {
+      if (!fs.existsSync(RESUME_PATH)) throw new Error(`resume file missing: ${RESUME_PATH}`);
+      await page.locator('#attachCV, input[type="file"]').first().setInputFiles(RESUME_PATH);
+      // verify from the server: reload and re-read the uploaded-on date
+      await page.waitForTimeout(10000);
+      await page.goto(PROFILE_URL, { waitUntil: 'domcontentloaded', timeout: 60000 });
+      const after = await page
+        .getByText(/Uploaded on/i)
+        .first()
+        .innerText({ timeout: 30000 })
+        .catch(() => '');
+      if (!todayRe.test(after)) throw new Error(`cv upload did not stick — profile still shows "${after.slice(0, 80).replace(/\s+/g, ' ')}"`);
+      cvMsg = 'cv re-uploaded (verified)';
+    }
+
+    log(`OK: headline ${dotMsg} (verified), ${cvMsg} → "${updated.slice(0, 60)}"`);
   } catch (err) {
     const pages = ctx.pages();
     for (let i = 0; i < pages.length; i++) {

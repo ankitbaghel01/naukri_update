@@ -21,8 +21,8 @@ profile update on Naukri. Schedule it hourly and forget about it.
 **1. Clone and install:**
 
 ```powershell
-git clone <this-repo-url>
-cd auto-apply
+git clone https://github.com/ankitbaghel01/naukri_update.git
+cd naukri_update
 npm install
 ```
 
