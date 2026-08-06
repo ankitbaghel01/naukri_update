@@ -104,9 +104,9 @@ Dear ${company ? company + ' team' : 'Hiring Manager'},
 
 I'd like to apply for the ${title || 'Full Stack Developer'} position at ${company || 'your company'}.
 
-I'm currently an AI Full Stack Developer at powersmy.biz, where most of my time goes to building REST APIs in Python and FastAPI, front ends in React and TypeScript, and AI agents with LangChain and LangGraph. A recent example: ${CV.highlights[0] || 'production GenAI tutor agents serving 500+ students'}. It all runs on GCP with Docker and PostgreSQL, so I've spent enough time debugging deployments to know what tends to go wrong there.
+I'm currently ${CV.currentRole || 'a software developer'}, working daily with ${CV.skills.split(',').slice(0, 8).join(',').trim()}. A recent example of my work: ${CV.highlights[0] || 'shipping production features end to end'}.
 
-Before this I was at India Accelerator working across the MERN stack. And before that, after my team was selected through Smart India Hackathon, I interned at ISRO-SAC on a cybersecurity project, where I built an ML-based Context-Aware Firewall.
+${CV.highlights[1] || ''}${CV.highlights[2] ? ' ' + CV.highlights[2] + '.' : ''}
 
 I'm interested in this role because the ${title || 'Full Stack Developer'} role matches the stack I work in every day, and I'd get to own features end to end${company ? ' at ' + company : ''}. Happy to walk through any of the above if it's useful.
 
@@ -339,7 +339,7 @@ ${CV.name}`;
       // never leave a location/relocation dropdown unanswered.
       const pick =
         opts.find((o) => YES.test(o.text)) ||
-        opts.find((o) => /bengaluru|bangalore/i.test(o.text)) ||
+        opts.find((o) => CV.location && o.text.toLowerCase().includes(CV.location.split(',')[0].trim().toLowerCase())) ||
         opts[0];
       setValue(sel, pick.value);
       log(`  ☑ selected "${pick.text.trim()}" for "${labelTextOf(sel).slice(0, 50)}"`);

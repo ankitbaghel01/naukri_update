@@ -14,9 +14,6 @@ script into the `/jobs` feed, and the script:
 It starts in **DRY RUN** mode by default — it fills everything but never presses Send —
 so you can watch it work before going live.
 
-Also included: `naukri-profile-refresh.js`, a small script that keeps your Naukri
-profile "recently updated" (see [Naukri profile refresh](#naukri-profile-refresh-optional)).
-
 ## Requirements
 
 - Windows 10/11 (Task Scheduler used for automatic daily runs — manual runs work anywhere Node does)
@@ -140,24 +137,10 @@ Unregister-ScheduledTask WellfoundAutoApply  # remove
 | `apply-state-wellfound.json` | Today's application count for the 50/day cap (git-ignored) |
 | `auto-apply-wellfound.log` | Run history (git-ignored) |
 | `.wellfound-chrome-profile/` | Saved Chrome session (git-ignored) |
-| `indeed-auto-apply.js`, `naukri-auto-apply.js` | Same idea for Indeed/Naukri — console-paste scripts (Indeed's final step is blocked by reCAPTCHA when automated) |
-
-## Naukri profile refresh (optional)
-
-`naukri-profile-refresh.js` keeps your Naukri profile "recently updated" so recruiters
-see it first: it cycles a trailing dot on your resume headline and re-uploads your CV
-once a day, verifying each save on the server.
-
-```powershell
-node naukri-profile-refresh.js login   # one-time Google sign-in
-node naukri-profile-refresh.js         # one silent refresh
-```
-
-Schedule it hourly the same way as above (task name `NaukriProfileRefresh`, no arguments).
 
 ## Disclaimer
 
-Auto-applying may violate Wellfound's (and Naukri's) Terms of Service and can get an
+Auto-applying may violate Wellfound's Terms of Service and can get an
 account rate-limited or banned. The delays are deliberately human-like and everything
 runs on your own machine with your own account — use at your own risk, and review
 the dry run before going live.
