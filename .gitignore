@@ -16,7 +16,7 @@ apply-state-*.json
 
 # machine-specific launchers (contain absolute local paths)
 *.vbs
-
+.gitignore
 # local tooling / scratch
 .claude/
 naukri_update/

@@ -205,7 +205,8 @@ function buildInjection() {
           page.evaluate(() => {
             const q = (s) => document.querySelector(s)?.textContent?.trim() || '';
             return {
-              company: q('[data-testid="inlineHeader-companyName"]') || q('[data-company-name]') || q('a[href^="/company/"]'),
+              company: (document.body.innerText.match(/Apply to (.{2,60})/) || [])[1]?.trim() ||
+                q('[data-testid="inlineHeader-companyName"]') || q('[data-company-name]') || q('a[href^="/company/"]'),
               salary: q('#salaryInfoAndJobType') || q('[data-testid*="salary" i]') ||
                 (document.body.innerText.match(/(?:₹|\$)\s?[\d,.]+(?:\s?-\s?(?:₹|\$)?[\d,.]+)?[^\n]{0,30}/) || [''])[0],
               jd: (q('#jobDescriptionText') || q('[class*="jobDescription" i]') || q('[class*="description" i]')).slice(0, 1200),

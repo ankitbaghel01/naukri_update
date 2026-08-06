@@ -25,9 +25,11 @@
   // ======================= CONFIG =======================
   const CONFIG = {
     DRY_RUN: true,             // true = fill forms but never click Send. Flip to false when ready.
-    MAX_APPLICATIONS: 15,      // stop after this many applications this run
-    MIN_DELAY_MS: 8000,        // wait between applications (randomized between min/max)
-    MAX_DELAY_MS: 20000,
+    MAX_APPLICATIONS: 50,      // stop after this many applications this run (runner overrides with 50/day cap minus today's count)
+    // 8-20s tripped Wellfound's DataDome bot-check on Jul 31 — human pace or bust.
+    // 50 apps × ~1.5-3 min ≈ 1.5-2.5h, well inside the runner's 100-min window per batch.
+    MIN_DELAY_MS: 60000,       // wait between applications (randomized between min/max)
+    MAX_DELAY_MS: 150000,
     geminiKey: __CFG.geminiKey || '',   // optional: Gemini API key for unmatched questions
 
     // Job titles to apply to (case-insensitive substring match on the job title)
@@ -42,6 +44,7 @@
     TITLE_BLOCKLIST: [
       'senior', 'principal', 'director', 'manager', 'lead', 'devops',
       'data engineer', 'qa', 'test', 'intern', 'designer', 'sales', 'marketing',
+      'teacher', 'trainer', 'tutor', 'instructor', 'coach',
       '.net', 'c#', 'php', 'ruby', 'golang', 'ios', 'android native', 'flutter',
     ],
   };
@@ -91,20 +94,26 @@
     `I'm ${CV.name}, ${CV.currentRole}. Happy to elaborate in an interview — key highlights: ` +
     CV.highlights.slice(0, 2).join('; ') + '.';
 
-  // ============== COVER LETTER (same letter for every job; company + title filled in) ==============
+  // ============== COVER LETTER (per-job: company + title filled in) ==============
   function coverLetter(company, title) {
-    const role = CV.currentRole.split(' at ')[0] || 'a developer';
-    return `Hi ${company ? company + ' team' : 'there'},
+    return `${CV.name}
+${CV.phone} · ${CV.email}
+${CV.linkedin} · ${CV.github} · ${CV.portfolio}
 
-I'm ${CV.name}, ${role}, and the ${title || 'open engineering'} role is exactly the kind of work I do every day. ${CV.highlights[0] || ''}${CV.highlights[1] ? '. ' + CV.highlights[1] : ''}.
+Dear ${company ? company + ' team' : 'Hiring Manager'},
 
-${[CV.highlights[3], CV.highlights[4]].filter(Boolean).join('. ')}.
+I'd like to apply for the ${title || 'Full Stack Developer'} position at ${company || 'your company'}.
 
-I move fast, own features end to end, and I'd love to bring that to ${company || 'your team'}. Happy to chat anytime.
+I'm currently an AI Full Stack Developer at powersmy.biz, where most of my time goes to building REST APIs in Python and FastAPI, front ends in React and TypeScript, and AI agents with LangChain and LangGraph. A recent example: ${CV.highlights[0] || 'production GenAI tutor agents serving 500+ students'}. It all runs on GCP with Docker and PostgreSQL, so I've spent enough time debugging deployments to know what tends to go wrong there.
 
-Best,
-${CV.name}
-${CV.email} | ${CV.phone}`;
+Before this I was at India Accelerator working across the MERN stack. And before that, after my team was selected through Smart India Hackathon, I interned at ISRO-SAC on a cybersecurity project, where I built an ML-based Context-Aware Firewall.
+
+I'm interested in this role because the ${title || 'Full Stack Developer'} role matches the stack I work in every day, and I'd get to own features end to end${company ? ' at ' + company : ''}. Happy to walk through any of the above if it's useful.
+
+Thank you for your time.
+
+Sincerely,
+${CV.name}`;
   }
 
   // ======================= HELPERS =======================
@@ -134,7 +143,9 @@ ${CV.email} | ${CV.phone}`;
   }
 
   function visible(el) {
-    return el && el.offsetParent !== null && !el.disabled;
+    // getClientRects, not offsetParent — offsetParent is null for position:fixed
+    // elements (modal footers), which made real Send buttons look invisible
+    return el && el.getClientRects().length > 0 && !el.disabled;
   }
 
   // Job cards concatenate title + location + salary + "Posted 3 weeks ago" etc.
@@ -151,6 +162,11 @@ ${CV.email} | ${CV.phone}`;
   // Company name from the opened job pane. Falls back to '' (letter then says
   // "Hi there team" / "your team") rather than a wrong heading like "About the job".
   function getCompany() {
+    // 2026 UI: the apply panel header reads "Apply to <Company>"
+    const panelHeader = [...document.querySelectorAll('h1, h2, h3, div')]
+      .map((e) => (e.children.length === 0 ? e.textContent.trim() : ''))
+      .find((t) => /^apply to .{2,60}$/i.test(t));
+    if (panelHeader) return panelHeader.replace(/^apply to /i, '').trim();
     const el =
       document.querySelector('a[href^="/company/"] h2') ||
       document.querySelector('[data-test="StartupHeader"] h1') ||
@@ -209,14 +225,38 @@ ${CV.email} | ${CV.phone}`;
     jobCards: '[data-test="StartupResult"] a[href*="/jobs/"], a[href^="/jobs/"][class]',
     modal: '[role="dialog"], [class*="modal" i]',
     applyButtonText: /^apply$|apply now/i,
-    sendButtonText: /^send$|submit|send application/i,
+    // 2026 UI: the submit button in the "Apply to <Company>" panel is labeled "Apply"
+    sendButtonText: /^apply$|^send$|submit|send application/i,
     alreadyApplied: /applied/i,
   };
 
   // ======================= APPLY TO ONE JOB (inside opened modal/pane) =======================
   async function fillAndSubmit(company, title) {
-    const modal = await waitFor(() => document.querySelector(SELECTORS.modal));
-    const scope = modal || document;
+    // several overlays match the modal selector — pick the one that IS the apply
+    // panel ("Apply to <Company>" + cover-letter textarea), not the page shell
+    const modal = await waitFor(() => {
+      const dialogs = [...document.querySelectorAll(SELECTORS.modal)];
+      return dialogs.find((d) => /apply to /i.test(d.textContent) && d.querySelector('textarea')) ||
+             dialogs.find((d) => /apply to /i.test(d.textContent)) || // panel with only radio/select questions, no cover-letter box
+             dialogs.find((d) => d.querySelector('textarea'));
+    });
+    // No apply modal → we're on a bare job page (full navigation, e.g. from a
+    // non-SPA search page). The page-level "Apply" button only OPENS the panel;
+    // clicking it and counting a "send" was creating phantom applications. Bail.
+    if (!modal) {
+      log('  ⚠ no apply modal found — skipping (not counting as sent)');
+      return false;
+    }
+    const scope = modal;
+
+    // Location-gated job ("X is not accepting applications from your current location…")
+    // → Send is disabled, nothing we fill changes that. Skip immediately.
+    if (/not accepting applications from your (current )?location/i.test(scope.textContent)) {
+      log('  🚫 location-blocked by company — skipping');
+      findButtonByText(scope, /close|cancel|×/i)?.click();
+      scope.querySelector('[aria-label="Close"]')?.click();
+      return false;
+    }
 
     // 1. Cover letter: the big textarea ("What interests you about working for this company?")
     const textareas = [...scope.querySelectorAll('textarea')].filter(visible);
@@ -340,12 +380,22 @@ ${CV.email} | ${CV.phone}`;
 
     // 4. Send — poll for it, the modal sometimes renders the button late
     const sendBtn = await waitFor(() => findButtonByText(scope, SELECTORS.sendButtonText), 12000);
-    if (!sendBtn) { log('  ⚠ no Send button found after waiting — skipping'); return false; }
+    if (!sendBtn) {
+      // tell "button exists but disabled" (blocked application) apart from "selector miss"
+      const disabledBtn = [...scope.querySelectorAll('button, [type="submit"]')]
+        .find((b) => SELECTORS.sendButtonText.test(b.textContent.trim()) && b.disabled);
+      log(disabledBtn
+        ? '  🚫 Send button is disabled (application blocked) — skipping'
+        : '  ⚠ no Send button found after waiting — skipping');
+      findButtonByText(scope, /close|cancel|×/i)?.click();
+      scope.querySelector('[aria-label="Close"]')?.click();
+      return false;
+    }
     if (CONFIG.DRY_RUN) {
       log('  🔍 DRY_RUN — would click:', sendBtn.textContent.trim());
       // close the modal so the loop can continue
       findButtonByText(scope, /close|cancel|×/i)?.click();
-      document.querySelector('[aria-label="Close"]')?.click();
+      scope.querySelector('[aria-label="Close"]')?.click();
       return true;
     }
     sendBtn.click();
@@ -360,23 +410,20 @@ ${CV.email} | ${CV.phone}`;
            !CONFIG.TITLE_BLOCKLIST.some((k) => lower.includes(k));
   };
 
-  // Each job card on the Wellfound listing has its own Apply button — click THAT,
-  // never the job title link (navigating away would kill this pasted script).
+  // 2026 UI: job cards no longer carry an Apply button. Clicking the job link opens
+  // an SPA overlay (URL gains ?job_listing_slug=…) with the "Apply to <Company>"
+  // panel — a client-side route change, so this pasted script keeps running.
   function findJobRows() {
     const rows = [];
     for (const a of document.querySelectorAll('a[href*="/jobs/"]')) {
       // real job links look like /jobs/4491644-some-slug (nav "Jobs" link has no id)
       if (!/\/jobs\/\d/.test(a.getAttribute('href') || '')) continue;
       if (!visible(a) || a.textContent.trim().length < 4) continue;
-      // walk up to the card container that holds this job's Apply button
-      let row = a.parentElement;
-      let applyBtn = null;
-      for (let i = 0; i < 7 && row; i++, row = row.parentElement) {
-        applyBtn = [...row.querySelectorAll('button')]
-          .find((b) => visible(b) && /^apply$/i.test(b.textContent.trim()));
-        if (applyBtn) break;
-      }
-      if (!applyBtn) continue;
+      let row = a.closest('div');
+      for (let i = 0; i < 5 && row && row.textContent.trim().length < 60; i++) row = row.parentElement;
+      row = row || a.parentElement;
+      // already applied? the card shows an "Applied" stamp
+      if (SELECTORS.alreadyApplied.test([...row.querySelectorAll('button, span')].map((e) => e.textContent.trim()).find((t) => /^applied$/i.test(t)) || '')) continue;
       // only fresh jobs: skip anything posted more than 14 days ago (cards without a
       // "posted X ago" stamp are kept — wellfound delists stale jobs anyway)
       const posted = row.textContent.match(/posted (?:about )?(\d+)\+? ?(day|week|month)s? ago/i);
@@ -389,7 +436,7 @@ ${CV.email} | ${CV.phone}`;
       const company = (row.querySelector('img[alt*="logo" i]')?.alt || '')
         .replace(/company logo/i, '').trim();
       const salary = (row.textContent.match(/(?:₹|\$|€)\s?[\d.,k]+\s?(?:[–-]\s?(?:₹|\$|€)?\s?[\d.,k]+)?k?/i) || [''])[0].trim();
-      rows.push({ href: a.href, title: cleanTitle(a.textContent), company, salary, applyBtn });
+      rows.push({ href: a.href, title: cleanTitle(a.textContent), company, salary, linkEl: a });
     }
     return rows;
   }
@@ -399,16 +446,15 @@ ${CV.email} | ${CV.phone}`;
   // own Next.js router (window.next.router) — a client-side route change, so
   // this pasted script KEEPS RUNNING across pages. A bad/404 slug just yields
   // zero jobs and we move on to the next one.
-  const SEARCH_PAGES = [
-    '/role/r/full-stack-developer', '/role/full-stack-developer',
-    '/role/r/software-engineer', '/role/software-engineer',
-    '/role/r/frontend-engineer', '/role/frontend-engineer',
-    '/role/r/backend-engineer', '/role/backend-engineer',
-    '/role/r/mobile-developer', '/role/mobile-developer',
-    '/role/r/machine-learning-engineer', '/role/machine-learning-engineer',
-    '/location/india',
-  ];
-  let searchIdx = 0;
+  // /role/* pages render empty for logged-in sessions (verified Jul 2026) — the
+  // /jobs feed with infinite scroll is the real inventory. /location/india as backup.
+  // '/location/india' removed: job clicks there are FULL navigations (no SPA
+  // overlay) — the script dies, gets re-injected each page, and phantom-applied
+  // to the same jobs in a loop (2026-08-06). /jobs infinite scroll only.
+  const SEARCH_PAGES = ['/jobs'];
+  // after a full page load onto one of the search pages, resume from the NEXT one —
+  // restarting at 0 would reload the same page forever
+  let searchIdx = SEARCH_PAGES.indexOf(location.pathname) + 1;
 
   async function goToNextSearchPage() {
     if (searchIdx >= SEARCH_PAGES.length) return false;
@@ -431,6 +477,7 @@ ${CV.email} | ${CV.phone}`;
 
   log(`Starting. DRY_RUN=${CONFIG.DRY_RUN}, max=${CONFIG.MAX_APPLICATIONS}`);
   log('Tip: keep this tab focused and do not navigate away.');
+  await sleep(5000); // job cards render after load — don't declare the page empty too early
 
   while (applied < CONFIG.MAX_APPLICATIONS) {
     const allRows = findJobRows();
@@ -442,11 +489,16 @@ ${CV.email} | ${CV.phone}`;
           (allRows.length ? ` — sample titles: ${allRows.slice(0, 3).map((j) => `"${j.title}"`).join(', ')}` : '') + ')');
 
       // Try to load more results on this page first
-      const more = findButtonByText(document, /load more|show more|next/i);
+      const more = findButtonByText(document, /load more|show more/i); // "next" is too generic — could hit a form's Next button
       if (more) { more.click(); await sleep(3000); continue; }
-      window.scrollTo(0, document.body.scrollHeight);
-      await sleep(3000);
-      if (findJobRows().some((j) => !seen.has(j.href) && titleOk(j.title))) continue;
+      // infinite-scroll feed: keep scrolling — new cards load in batches
+      let grew = false;
+      for (let s = 0; s < 6 && !grew; s++) {
+        window.scrollTo(0, document.body.scrollHeight);
+        await sleep(3000);
+        grew = findJobRows().some((j) => !seen.has(j.href) && titleOk(j.title));
+      }
+      if (grew) continue;
 
       // Page exhausted → search globally across role pages
       if (await goToNextSearchPage()) continue;
@@ -457,16 +509,21 @@ ${CV.email} | ${CV.phone}`;
     const job = jobs[0];
     seen.add(job.href);
     log(`▶ Applying: ${job.title} @ ${job.company || '?'} | ${job.href} | ${job.salary || ''}`);
-    job.applyBtn.scrollIntoView({ block: 'center' });
+    job.linkEl.scrollIntoView({ block: 'center' });
     await sleep(500);
-    job.applyBtn.click();
-    await sleep(2000);
+    job.linkEl.click(); // SPA overlay opens with the "Apply to <Company>" panel
+    await sleep(3000);
 
     const ok = await fillAndSubmit(job.company || getCompany(), job.title);
     if (ok) {
       applied++;
       log(`  progress: ${applied}/${CONFIG.MAX_APPLICATIONS}`);
     }
+    // close the job overlay (top-right ✕) so the next card is clickable
+    await sleep(1000);
+    (document.querySelector('button[aria-label="Close" i], [class*="Modal" i] button[class*="close" i]') ||
+      findButtonByText(document, /^×$|^✕$/))?.click();
+    await sleep(1000);
     await humanDelay();
   }
 
