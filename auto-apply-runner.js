@@ -14,7 +14,8 @@
  */
 const path = require('path');
 const fs = require('fs');
-const { CV, geminiKey } = require('./config'); // personal data from .env, injected into the console scripts
+const { CV, geminiKey, resumePath: RESUME_PATH } = require('./config'); // personal data from .env
+const { applyExternal } = require('./external-apply'); // "Apply on company site" jobs, driven from Node
 // stealth patches the fingerprint leaks reCAPTCHA uses to flag automation; falls back to plain playwright
 let chromium;
 try {
@@ -57,12 +58,23 @@ const SITES = {
   wellfound: {
     script: 'wellfound-auto-apply.js',
     profile: '.wellfound-chrome-profile',
-    searches: ['https://wellfound.com/jobs'],
+    // /jobs alone dead-ends at 19 listings; the role pages carry the real inventory
+    // (measured 2026-08-12). Same list the console script walks internally.
+    searches: [
+      'https://wellfound.com/jobs',
+      'https://wellfound.com/role/l/software-engineer/india',
+      'https://wellfound.com/role/r/software-engineer',
+      'https://wellfound.com/role/r/backend-engineer',
+      'https://wellfound.com/role/r/full-stack-engineer',
+      'https://wellfound.com/role/r/frontend-engineer',
+      'https://wellfound.com/role/r/mobile-engineer',
+    ],
     loginUrl: 'https://wellfound.com/login',
     injectOn: (url) => /wellfound\.com/.test(url),
     submittedRe: /application sent|DRY_RUN — would click/i,
     storeKey: null, // wellfound script keeps no localStorage state
     dailyCap: 50,
+    perRun: 30, // apply to 30 jobs in one go (still bounded by the 50/day cap)
   },
   naukri: {
     script: 'naukri-auto-apply.js',
@@ -83,6 +95,9 @@ const SITES = {
     submittedRe: /✅ applied|DRY_RUN — would click/,
     storeKey: 'autoApplyNaukri',
     dailyCap: 20,
+    // ~85-90% of Naukri dev listings are "Apply on company site" — follow them
+    // onto the employer's own form instead of skipping them.
+    externalApply: true,
   },
 };
 
@@ -100,8 +115,10 @@ const todayKey = new Date().toDateString();
 let dayState = { date: todayKey, count: 0 };
 try { const s = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8').replace(/^﻿/, '')); if (s.date === todayKey) dayState = s; } catch (e) {}
 const bumpDayCount = () => { dayState.count++; try { fs.writeFileSync(STATE_FILE, JSON.stringify(dayState)); } catch (e) {} };
-const TARGET = DAILY_CAP - dayState.count;
+// per-run target (site.perRun) capped by whatever is left of the daily allowance
+const TARGET = Math.min(site.perRun || DAILY_CAP, DAILY_CAP - dayState.count);
 const MAX_RUNTIME_MS = 100 * 60 * 1000;
+const MAX_RESTARTS = 8; // browser gets closed and reopened this many times before giving up
 const IDLE_ROTATE_MS = 4 * 60 * 1000;
 
 const log = (msg) => console.log(`[${new Date().toLocaleString()}] [${SITE_ARG}] ${msg}`);
@@ -127,6 +144,10 @@ function logApplication(job) {
 
 // Patch the console script: our DRY_RUN flag, our per-run target, and a busy-guard
 // so a second injection while one is still running becomes a no-op.
+// The job set lives HERE, in Node, not in the page: wellfound's role/job pages do not
+// share localStorage with the /jobs feed across navigations (measured 2026-08-12 — the
+// stored list kept resetting to 1), so the script re-opened the same job every cycle.
+const seenJobs = new Set(); // /jobs/<id>-slug of every job already opened this run
 function buildInjection() {
   const raw = fs
     .readFileSync(path.join(__dirname, site.script), 'utf8')
@@ -136,7 +157,7 @@ function buildInjection() {
   // so no PII lives in the injected script itself
   return `(async () => {
     if (window.__aaBusy) return; window.__aaBusy = true;
-    window.__APPLY_CONFIG = ${JSON.stringify({ CV, geminiKey })};
+    window.__APPLY_CONFIG = ${JSON.stringify({ CV, geminiKey, seen: [...seenJobs] })};
     try { await ${raw}
     } finally { window.__aaBusy = false; }
   })()`;
@@ -147,7 +168,7 @@ function buildInjection() {
     log(`Daily cap of ${DAILY_CAP} applications already reached (${dayState.count} today) — exiting.`);
     return;
   }
-  const ctx = await chromium.launchPersistentContext(path.join(__dirname, site.profile), {
+  const launch = () => chromium.launchPersistentContext(path.join(__dirname, site.profile), {
     channel: 'chrome',
     headless: false, // bot checks block headless; headed + off-screen instead (same trick as naukri refresh)
     viewport: { width: 1280, height: 900 },
@@ -159,9 +180,10 @@ function buildInjection() {
       ...(LOGIN_MODE ? [] : ['--window-position=-32000,-32000']),
     ],
   });
-  const mainPage = ctx.pages()[0] || (await ctx.newPage());
 
   if (LOGIN_MODE) {
+    const ctx = await launch();
+    const mainPage = ctx.pages()[0] || (await ctx.newPage());
     await mainPage.goto(site.loginUrl, { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => {});
     log('Chrome is open — log in to the site, then CLOSE the browser window. The session is saved automatically.');
     await new Promise((res) => ctx.on('close', res));
@@ -170,14 +192,27 @@ function buildInjection() {
   }
 
   log(`Starting. mode=${LIVE ? 'LIVE' : 'DRY RUN'} target=${TARGET} applications, max ${MAX_RUNTIME_MS / 60000} min`);
-  const injection = buildInjection();
   const deadline = Date.now() + MAX_RUNTIME_MS;
   let submitted = 0;
   let lastActivity = Date.now();
   let searchIdx = 0;
   let pendingJob = null; // details of the job currently being applied to, for the CSV
+  const externalQueue = [];              // "Apply on company site" jobs, handled in Node
+  const externalSeen = new Set();
+  const extStats = { applied: 0, skipped: 0, failed: 0 };
 
   const isBusy = (p) => p.evaluate('!!window.__aaBusy').catch(() => false);
+
+  // Every full navigation wipes window.__aaBusy, so a page that keeps navigating
+  // (role/* search pages navigate on every job click) used to get a fresh script
+  // injected each time — four instances raced, and the human-pace delay vanished.
+  // One injection per 20s per run is plenty; the script itself loops internally.
+  let lastInject = 0;
+  const inject = async (page) => {
+    if (Date.now() - lastInject < 20000) return;
+    lastInject = Date.now();
+    await page.evaluate(buildInjection()).catch(() => {}); // navigation mid-run is normal
+  };
 
   function wire(page) {
     page.on('console', (msg) => {
@@ -193,12 +228,14 @@ function buildInjection() {
       }
 
       // "▶ Applying: <title> @ <company>" (wellfound) / "▶ Opening: <title>" (indeed)
-      const m = clean.match(/▶ (?:Applying|Opening): (.+)/);
+      const m = clean.match(/▶ (?:Applying|Opening)[^:]*: (.+)/);
       if (m) {
         const [main, link, cardSalary] = m[1].split(' | ');
         const atParts = main.split(' @ ');
         const company = atParts.length > 1 ? atParts.pop() : ''; // company is after the LAST ' @ ' — titles may contain '@'
         const title = atParts.join(' @ ');
+        const slug = ((link || main).match(/\/jobs\/\d+[^?#\s]*/) || [])[0];
+        if (slug) seenJobs.add(slug); // page storage is wiped across navigations; Node keeps it
         pendingJob = { title: title.trim(), company: (company || '').replace(/^\?$/, '').trim(), link: (link || '').trim(), salary: (cardSalary || '').trim(), skills: '', jd: '' };
         // scrape details once the job pane/description has rendered
         setTimeout(() => {
@@ -219,6 +256,14 @@ function buildInjection() {
             pendingJob.skills = matchSkills(pendingJob.title + ' ' + d.jd);
           }).catch(() => {});
         }, SITE_ARG === 'indeed' ? 6000 : 2000); // indeed pane loads slower; wellfound modal closes fast
+      }
+
+      // "🔗 EXTERNAL | <title> | <href>" — the console script can't cross origins,
+      // so queue it and let applyExternal() drive the company site from Node.
+      const ext = clean.match(/🔗 EXTERNAL \| (.+) \| (\S+)/);
+      if (ext && !externalSeen.has(ext[2])) {
+        externalSeen.add(ext[2]);
+        externalQueue.push({ title: ext[1].trim(), href: ext[2].trim() });
       }
 
       if (site.submittedRe.test(text)) {
@@ -246,10 +291,20 @@ function buildInjection() {
           } catch (e) {}
         }, [site.storeKey, new Date().toDateString()]).catch(() => {});
       }
-      await page.evaluate(injection).catch(() => {}); // navigation mid-run is normal
+      await inject(page);
     });
   }
 
+  // One browser session. Returns as soon as it stops making progress (searches
+  // exhausted, page wedged, crash) — the caller then closes and reopens the browser.
+  async function session() {
+  const ctx = await launch();
+  const mainPage = ctx.pages()[0] || (await ctx.newPage());
+  searchIdx = 0;
+  lastActivity = Date.now();
+  let fruitless = 0;            // consecutive script cycles that applied to nothing
+  let submittedAtCycle = submitted;
+  try {
   ctx.pages().forEach(wire);
   ctx.on('page', wire);
 
@@ -260,7 +315,7 @@ function buildInjection() {
   if (/sign in|log in to continue|create an account|verify you are human/i.test(bodyText) && !/sign out/i.test(bodyText)) {
     log('WARNING: page looks logged-out or bot-checked. If runs keep finding 0 jobs, run: node auto-apply-runner.js ' + SITE_ARG + ' login');
   }
-  await mainPage.evaluate(injection).catch(() => {});
+  await inject(mainPage);
 
   // Supervisor: re-inject the search tab when idle, close finished form tabs,
   // rotate searches on inactivity, stop on target/time.
@@ -281,6 +336,27 @@ function buildInjection() {
       }
     }
 
+    // Work the external queue whenever the in-page script is idle, so the two
+    // never drive the browser at the same time.
+    while (site.externalApply && !anyBusy && externalQueue.length && submitted < TARGET && Date.now() < deadline) {
+      const job = externalQueue.shift();
+      log(`🔗 external: ${job.title}`);
+      const res = await applyExternal(ctx, job, { CV, live: LIVE, resumePath: RESUME_PATH, log });
+      lastActivity = Date.now();
+      log(`   ${res.status}: ${res.detail}`);
+      if (res.status === 'applied' || res.status === 'would-apply') {
+        extStats.applied++;
+        submitted++;
+        log(`==> ${submitted}/${TARGET} this run (${dayState.count + (LIVE ? 1 : 0)}/${DAILY_CAP} today)`);
+        if (LIVE) {
+          bumpDayCount();
+          try { logApplication({ title: job.title, company: '', salary: '', skills: matchSkills(job.title), link: job.href, jd: 'external (company site)' }); }
+          catch (e) { log('CSV write failed: ' + e.message); }
+        }
+      } else extStats[res.status === 'skipped' ? 'skipped' : 'failed']++;
+      await new Promise((r) => setTimeout(r, 20000 + Math.random() * 25000)); // human-ish gap
+    }
+
     if (!anyBusy) {
       if (Date.now() - lastActivity > IDLE_ROTATE_MS) {
         searchIdx++;
@@ -288,11 +364,52 @@ function buildInjection() {
         log(`Rotating to next search: ${site.searches[searchIdx]}`);
         await mainPage.goto(site.searches[searchIdx], { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => {});
       } else {
-        await mainPage.evaluate(injection).catch(() => {}); // continue with next job on this page
+        // Re-injecting forever in a wedged browser looks like progress but isn't:
+        // a bot-check, a dead SPA or a stale session produce the same "script ran,
+        // applied nothing" cycle every time. After 3 fruitless cycles, hand back to
+        // the caller so the browser is closed and reopened fresh.
+        if (submitted === submittedAtCycle) {
+          if (++fruitless >= 3) {
+            log('No applications in 3 script cycles — closing the browser and reopening.');
+            return;
+          }
+        } else { fruitless = 0; submittedAtCycle = submitted; }
+        await inject(mainPage); // continue with next job on this page
       }
     }
   }
+  } finally {
+    await ctx.close().catch(() => {});
+  }
+  }
+
+  // Close-and-reopen loop: a session that ends early (feed exhausted, tab wedged,
+  // browser crash) costs a fresh browser, not the run. `submitted` and `deadline`
+  // live outside, so restarts resume toward the same 30 rather than starting over.
+  for (let attempt = 1; submitted < TARGET && Date.now() < deadline; attempt++) {
+    if (attempt > 1) log(`↻ Reopening browser (attempt ${attempt}/${MAX_RESTARTS}) — ${submitted}/${TARGET} done so far`);
+    try {
+      await session();
+    } catch (e) {
+      const msg = String(e && e.message || e).split('\n')[0];
+      log('session ended with an error: ' + msg);
+      // A previous Chrome still holding the profile is a wait-it-out problem, not a
+      // dead run — don't spend one of the 8 restarts (and 8 of them burned in 2 min).
+      if (/already in use|Opening in existing browser/i.test(msg)) {
+        attempt--;
+        log('profile still locked by another Chrome — waiting 30s');
+        await new Promise((r) => setTimeout(r, 30000));
+        continue;
+      }
+    }
+    if (submitted >= TARGET || Date.now() >= deadline) break;
+    if (attempt >= MAX_RESTARTS) { log(`Stopping after ${MAX_RESTARTS} browser restarts — no more jobs to apply to.`); break; }
+    await new Promise((r) => setTimeout(r, 15000)); // let the profile lock clear before relaunching
+  }
 
   log(`Finished: ${submitted}/${TARGET} applications ${LIVE ? 'submitted' : 'simulated (dry run)'}.`);
-  await ctx.close();
+  if (site.externalApply) {
+    log(`External (company site): ${extStats.applied} applied, ${extStats.skipped} skipped (account required / not a form), ` +
+        `${extStats.failed} failed, ${externalQueue.length} left in queue.`);
+  }
 })().catch((e) => { log('FATAL: ' + e.message.split('\n')[0]); process.exit(1); });

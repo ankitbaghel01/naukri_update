@@ -65,7 +65,7 @@
   // ======================= CV DATA (from .env via the runner) =======================
   const CV = __CFG.CV || {
     name: '', email: '', phone: '', location: '', currentRole: '', company: '', education: '',
-    yearsOfExperience: '', skills: '', highlights: ['', '', '', '', ''], noticePeriod: '',
+    yearsOfExperience: '', yearsNumber: '1', skills: '', highlights: ['', '', '', '', ''], noticePeriod: '',
     currentCTC: '', expectedCTC: '', currentSalary: '', expectedSalary: '', dob: '', gender: '',
     workAuth: '', github: '', linkedin: '', portfolio: '', links: '', remoteOk: '', relocate: '', startDate: '',
   };
@@ -78,7 +78,7 @@
     [/notice period|when can you (start|join)|start date|joining|how soon/i, CV.noticePeriod],
     [/current .{0,15}(ctc|salary|compensation|annual)/i, CV.currentCTC],          // bare lakhs number
     [/(expected|desired) .{0,15}(ctc|salary|compensation|pay)|salary expectation/i, CV.expectedCTC], // bare lakhs
-    [/years? of (work |professional |total |relevant )?experience|how (long|many years)|total experience|relevant experience/i, '1'],
+    [/years? of (work |professional |total |relevant )?experience|how (long|many years)|total experience|relevant experience/i, CV.yearsNumber || '1'],
     [/remote|work from home|wfh/i, CV.remoteOk],
     [/reloc|move to|shift to|based out of|work from (our )?office|commute|on-?site/i, CV.relocate],
     [/e-?mail/i, CV.email], // before location — "Email address" must not match /address/
@@ -100,8 +100,7 @@
       `AI is a core focus: production GenAI agents, RAG pipelines, tool calling, MCP and multi-agent systems.`],
     [/education|degree|university|college|qualification/i, CV.education],
     [/phone|contact number|mobile/i, CV.phone],
-    [/e-?mail/i, CV.email],
-    [/name/i, CV.name],
+    [/^name$|your name|full name|candidate name|first name/i, CV.name],
   ];
 
   const GENERIC_ANSWER =
@@ -110,6 +109,16 @@
   // ======================= HELPERS =======================
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const humanDelay = () => sleep(CONFIG.MIN_DELAY_MS + Math.random() * (CONFIG.MAX_DELAY_MS - CONFIG.MIN_DELAY_MS));
+  // Instantly materialising a full sentence is the most obviously non-human thing
+  // the script does. Insert it in 1-3 char bursts with jittered gaps instead.
+  const typeLikeHuman = async (doc, text) => {
+    for (let i = 0; i < text.length;) {
+      const n = 1 + Math.floor(Math.random() * 3);
+      doc.execCommand('insertText', false, text.slice(i, i + n));
+      i += n;
+      await sleep(45 + Math.random() * 95);
+    }
+  };
   const log = (...a) => console.log('%c[auto-apply]', 'color:#4a90d9;font-weight:bold', ...a);
 
   function visible(el) {
@@ -168,7 +177,10 @@
     applyButtonText: /^apply$/i,
     externalApplyText: /company site/i,
     alreadyAppliedText: /^applied/i,
-    appliedToast: /successfully applied|application sent/i,
+    // "you have already applied" deliberately NOT here — it's a duplicate-apply
+    // rejection, not a new application; counting it inflated state.applied.
+    appliedToast: /successfully applied|applied successfully|application sent|application submitted/i,
+    alreadyAppliedToast: /you have already applied/i,
     // chatbot questionnaire drawer (appears after Apply on some jobs)
     chatbot: '[class*="chatbot" i], [class*="_drawer" i][class*="chat" i]',
     botMessage: '[class*="botMsg" i], [class*="bot-msg" i], [class*="message" i] span',
@@ -180,7 +192,10 @@
 
   // ======================= CROSS-PASTE STATE =======================
   const STORE_KEY = 'autoApplyNaukri';
-  const state = JSON.parse(localStorage.getItem(STORE_KEY) || '{"seen":[],"applied":0}');
+  let state;
+  try { state = JSON.parse(localStorage.getItem(STORE_KEY)) || {}; } catch { state = {}; }
+  if (!Array.isArray(state.seen)) state.seen = [];
+  if (typeof state.applied !== 'number') state.applied = 0;
   const saveState = () => localStorage.setItem(STORE_KEY, JSON.stringify(state));
 
   const titleOk = (t) => {
@@ -217,9 +232,12 @@
         if (!input) { log('  ⚠ chatbot: no options and no input found — finish it manually.'); return false; }
         const answer = await answerQuestion(question);
         if (input.isContentEditable) {
+          // execCommand performs a real edit, so the browser fires a trusted
+          // input event; setting .textContent left the framework's state empty.
+          // Verified in Chrome: inserts the text and fires `input`.
           input.focus();
-          input.textContent = answer;
-          input.dispatchEvent(new InputEvent('input', { bubbles: true }));
+          doc.getSelection().selectAllChildren(input);
+          await typeLikeHuman(doc, String(answer));
         } else {
           const proto = input.tagName === 'TEXTAREA' ? doc.defaultView.HTMLTextAreaElement.prototype
                                                      : doc.defaultView.HTMLInputElement.prototype;
@@ -257,7 +275,9 @@
     }, 15000);
 
     if (!applyBtn) { log('  ⚠ no Apply button found — skipping.'); return false; }
-    if (applyBtn === 'external') { log('  ↪ "Apply on company site" — skipping external job.'); return false; }
+    // In-page JS can't follow the handoff to the employer's domain (cross-origin),
+    // so hand the job to the Node runner, which applies on the company site itself.
+    if (applyBtn === 'external') { log(`  🔗 EXTERNAL | ${job.title} | ${job.href}`); return false; }
     if (applyBtn === 'applied') { log('  already applied — skipping.'); return false; }
 
     if (CONFIG.DRY_RUN) {
@@ -266,21 +286,47 @@
     }
 
     applyBtn.click();
-    await sleep(3000);
 
     const doc = popup.document;
-    // Chatbot questionnaire?
-    if (doc.querySelector(SELECTORS.chatbot) && visible(doc.querySelector(SELECTORS.chatbot))) {
+    // Only the button we actually clicked counts as a state change. Scanning every
+    // button for /^applied/i matched unrelated chrome ("Applied filters", an
+    // already-applied entry in a similar-jobs rail) and confirmed a success that
+    // never happened. If Naukri swaps the node out instead of relabelling it,
+    // isConnected goes false and we fall back to the toast text.
+    const confirmed = () =>
+      SELECTORS.appliedToast.test(doc.body.textContent) ||
+      (applyBtn.isConnected && SELECTORS.alreadyAppliedText.test(applyBtn.textContent.trim()));
+
+    // Race the questionnaire drawer against the applied confirmation, whichever
+    // lands first. A fixed sleep raced the drawer's render and silently skipped
+    // the questions; polling the drawer alone stalled the full timeout on every
+    // direct apply, which is the common case.
+    const outcome = await waitFor(() => {
+      if (SELECTORS.alreadyAppliedToast.test(doc.body.textContent)) return 'duplicate';
+      const d = doc.querySelector(SELECTORS.chatbot);
+      if (d && visible(d)) return 'chatbot';
+      return confirmed() ? 'applied' : null;
+    }, 10000);
+    if (outcome === 'duplicate') { log('  ↩ already applied to this job — not counting it.'); return false; }
+    if (outcome === 'chatbot') {
       const ok = await handleChatbot(doc);
       if (!ok) return false;
     }
 
     // Confirm success (toast or Apply button turned into "Applied")
-    const success = await waitFor(() =>
-      SELECTORS.appliedToast.test(doc.body.textContent) ||
-      [...doc.querySelectorAll('button')].some((b) => SELECTORS.alreadyAppliedText.test(b.textContent.trim())),
-      10000);
-    log(success ? '  ✅ applied' : '  ⚠ could not confirm success — check the popup.');
+    const success = outcome === 'applied' || await waitFor(confirmed, 10000);
+    if (success) {
+      log('  ✅ applied');
+    } else {
+      // The confirmation wording is the one thing we could not verify without a real
+      // apply. Dump what the page actually said so the regex can be calibrated
+      // instead of guessing again.
+      const btns = [...doc.querySelectorAll('button')].filter(visible)
+        .map((b) => b.textContent.trim()).filter(Boolean).slice(0, 8);
+      log('  ⚠ could not confirm success — check the popup.');
+      log(`  🔬 calibration — visible buttons: ${JSON.stringify(btns)}`);
+      log(`  🔬 calibration — page text: "${doc.body.textContent.replace(/\s+/g, ' ').trim().slice(0, 300)}"`);
+    }
     return !!success;
   }
 
@@ -298,12 +344,13 @@
     const cards = [...document.querySelectorAll(SELECTORS.jobCards)].filter(visible);
     let job = null;
 
+    let nSeen = 0, nFiltered = 0;
     for (const card of cards) {
       const link = card.querySelector(SELECTORS.jobTitleLink);
       if (!link) continue;
       const title = link.textContent.replace(/\s+/g, ' ').trim();
-      if (state.seen.includes(link.href)) continue;
-      if (!titleOk(title)) continue;
+      if (state.seen.includes(link.href)) { nSeen++; continue; }
+      if (!titleOk(title)) { nFiltered++; continue; }
       job = { href: link.href, title, card };
       break;
     }
@@ -311,7 +358,10 @@
     if (!job) {
       const sample = cards.slice(0, 3).map((c) =>
         `"${(c.querySelector(SELECTORS.jobTitleLink)?.textContent || '?').trim().slice(0, 40)}"`).join(', ');
-      log(`(this page: ${cards.length} cards, 0 match — sample: ${sample})`);
+      // Split the two very different reasons for "nothing to do here": jobs already
+      // visited on an earlier run vs jobs the title filter rejected. Reporting a
+      // combined "0 match" made an exhausted page look like a broken filter.
+      log(`(this page: ${cards.length} cards — ${nSeen} already seen, ${nFiltered} filtered out; sample: ${sample})`);
       const nextBtn = findButtonByText(document, SELECTORS.nextPageText);
       if (nextBtn) {
         log('🌐 Next results page — the page will reload. PASTE THE SCRIPT AGAIN when it loads.');

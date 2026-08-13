@@ -39,6 +39,7 @@
       'web developer', 'ai engineer', 'ai developer', 'ml engineer',
       'react', 'node', 'javascript', 'typescript', 'python', 'mobile',
       'react native', 'sde', 'member of technical staff',
+      'platform engineer', 'founding engineer',
     ],
     // Skip jobs whose title contains any of these
     TITLE_BLOCKLIST: [
@@ -223,28 +224,82 @@ ${CV.name}`;
   const SELECTORS = {
     // job cards in the search results list — Wellfound uses div[data-test] attrs on job listings
     jobCards: '[data-test="StartupResult"] a[href*="/jobs/"], a[href^="/jobs/"][class]',
-    modal: '[role="dialog"], [class*="modal" i]',
-    applyButtonText: /^apply$|apply now/i,
-    // 2026 UI: the submit button in the "Apply to <Company>" panel is labeled "Apply"
-    sendButtonText: /^apply$|^send$|submit|send application/i,
+    // ONLY [role="dialog"]. '[class*="modal" i]' also matched <html class="Modal__open">
+    // and <body class="... Modal__open">, i.e. the whole page — every field lookup then
+    // scanned the entire document (it "answered" the sidebar's remote-preference radios)
+    // and the first ^apply$ button it found belonged to a DIFFERENT job card.
+    // Verified against the live DOM 2026-08-12.
+    modal: '[role="dialog"]',
+    applyButtonText: /^apply$/i,
+    // The real submit is "Send application", and it only exists AFTER the page-level
+    // "Apply" button opens the dialog. '^apply$' here was the whole bug: the script
+    // clicked the button that merely OPENS the form and logged "application sent".
+    sendButtonText: /^send application$|^send$|^submit application$/i,
     alreadyApplied: /applied/i,
   };
 
+  // The apply dialog: a [role="dialog"] holding a <form> with the "Send application" button.
+  const applyDialog = () =>
+    [...document.querySelectorAll(SELECTORS.modal)]
+      .filter(visible)
+      .find((d) => findButtonByText(d, SELECTORS.sendButtonText) ||
+                   [...d.querySelectorAll('button')].some((b) => SELECTORS.sendButtonText.test(b.textContent.trim())));
+
+  // Pick the "Apply" button that belongs to THIS job. Several cards render their own
+  // "Apply", so the first match on the page is usually someone else's job (verified:
+  // clicking blindly opened job 4547666 while 4546264 was the one opened). Rule: walk up
+  // to the first ancestor that contains job links, and require every one of them to be ours.
+  function findApplyButtonFor(href) {
+    const slug = ((href || '').match(/\/jobs\/\d+[^?#]*/) || [])[0];
+    if (!slug) return null;
+    const buttons = [...document.querySelectorAll('button, a[role="button"]')]
+      .filter((b) => visible(b) && SELECTORS.applyButtonText.test(b.textContent.trim()));
+    // Standalone job page (/jobs/<id>-slug): role/location search pages do a FULL
+    // navigation instead of opening the SPA overlay, so we land here. The whole page
+    // is this one job — every Apply on it is ours, no card scoping needed. (The
+    // card rule below rejects them: their ancestors also list 10 "similar jobs".)
+    if (location.pathname.startsWith(slug.split('?')[0])) {
+      return buttons[0] ||
+        [...document.querySelectorAll('button, a[role="button"]')]
+          .find((b) => visible(b) && /^apply now$/i.test(b.textContent.trim())) || null;
+    }
+    for (const b of buttons) {
+      for (let e = b.parentElement; e && e !== document.body; e = e.parentElement) {
+        const jobLinks = [...e.querySelectorAll('a[href*="/jobs/"]')]
+          .map((a) => a.getAttribute('href') || '')
+          .filter((h) => /\/jobs\/\d/.test(h));
+        if (!jobLinks.length) continue;
+        if (jobLinks.every((h) => h.startsWith(slug))) return b;
+        break; // this ancestor mixes in other jobs → not a card-scoped Apply
+      }
+    }
+    return null;
+  }
+
   // ======================= APPLY TO ONE JOB (inside opened modal/pane) =======================
-  async function fillAndSubmit(company, title) {
-    // several overlays match the modal selector — pick the one that IS the apply
-    // panel ("Apply to <Company>" + cover-letter textarea), not the page shell
-    const modal = await waitFor(() => {
-      const dialogs = [...document.querySelectorAll(SELECTORS.modal)];
-      return dialogs.find((d) => /apply to /i.test(d.textContent) && d.querySelector('textarea')) ||
-             dialogs.find((d) => /apply to /i.test(d.textContent)) || // panel with only radio/select questions, no cover-letter box
-             dialogs.find((d) => d.querySelector('textarea'));
-    });
-    // No apply modal → we're on a bare job page (full navigation, e.g. from a
-    // non-SPA search page). The page-level "Apply" button only OPENS the panel;
-    // clicking it and counting a "send" was creating phantom applications. Bail.
+  async function fillAndSubmit(company, title, href) {
+    // Opening the job card only shows the job pane — the apply form does not exist yet.
+    // Click this job's own "Apply" button to open the dialog that holds the real form.
+    // A dialog left open here belongs to the PREVIOUS job (its close click missed).
+    // Reusing it would submit this job's cover letter to that job — always start clean.
+    const stale = applyDialog();
+    if (stale) {
+      log('  ⚠ stale apply dialog from the previous job — closing it first');
+      findButtonByText(stale, /^cancel$|close/i)?.click();
+      stale.querySelector('[aria-label="Close"]')?.click();
+      await waitFor(() => !applyDialog(), 5000);
+    }
+    const openBtn = findApplyButtonFor(href);
+    if (!openBtn) {
+      log('  ⚠ no Apply button found for this job — skipping (not counting as sent)');
+      return false;
+    }
+    openBtn.scrollIntoView({ block: 'center' });
+    await sleep(400);
+    openBtn.click();
+    const modal = await waitFor(applyDialog, 15000);
     if (!modal) {
-      log('  ⚠ no apply modal found — skipping (not counting as sent)');
+      log('  ⚠ apply dialog never opened — skipping (not counting as sent)');
       return false;
     }
     const scope = modal;
@@ -399,7 +454,24 @@ ${CV.name}`;
       return true;
     }
     sendBtn.click();
-    log('  ✅ application sent');
+
+    // VERIFY. A click is not a submission: the old code logged "sent" here and moved on,
+    // which is how 54 phantom applications got recorded on 2026-08-12 while Wellfound's
+    // Applied tab still showed Jul 31. Only a dialog that actually closes counts.
+    const closed = await waitFor(() => !applyDialog(), 25000);
+    if (!closed) {
+      const err = (scope.innerText.match(/.*(required|error|please|invalid|try again).*/i) || [''])[0].trim().slice(0, 120);
+      log(`  ❌ submit did NOT go through — dialog still open${err ? ` | ${err}` : ''} — NOT counted`);
+      findButtonByText(scope, /^cancel$|close/i)?.click();
+      return false;
+    }
+    // Extra (non-blocking) confirmation: the card usually flips to an "Applied" stamp.
+    const stamped = await waitFor(
+      () => [...document.querySelectorAll('button, span, div')]
+        .some((e) => e.children.length === 0 && /^applied$/i.test(e.textContent.trim())),
+      6000
+    );
+    log(`  ✅ application sent (dialog closed${stamped ? ', "Applied" stamp confirmed' : ', no stamp seen'})`);
     return true;
   }
 
@@ -446,12 +518,26 @@ ${CV.name}`;
   // own Next.js router (window.next.router) — a client-side route change, so
   // this pasted script KEEPS RUNNING across pages. A bad/404 slug just yields
   // zero jobs and we move on to the next one.
-  // /role/* pages render empty for logged-in sessions (verified Jul 2026) — the
-  // /jobs feed with infinite scroll is the real inventory. /location/india as backup.
-  // '/location/india' removed: job clicks there are FULL navigations (no SPA
-  // overlay) — the script dies, gets re-injected each page, and phantom-applied
-  // to the same jobs in a loop (2026-08-06). /jobs infinite scroll only.
-  const SEARCH_PAGES = ['/jobs'];
+  // Measured 2026-08-12 (jobs found / matching this CV's filters, all SPA-navigable):
+  //   /jobs                              19 / 7   ← NOT infinite scroll: dead-stops at 19
+  //   /role/l/software-engineer/india    37 / 24
+  //   /role/r/software-engineer          34 / 22
+  //   /role/r/backend-engineer           44 / 20
+  //   /role/r/full-stack-engineer        27 / 20
+  //   /role/r/frontend-engineer          27 / 15
+  //   /role/r/mobile-engineer            32 / 10
+  // The old "/role/* renders empty when logged in" note is stale — those pages are
+  // now the bulk of the inventory, and /jobs alone caps the run at ~7 applications.
+  // '/location/india' stays out: job clicks there are FULL navigations, not SPA.
+  const SEARCH_PAGES = [
+    '/jobs',
+    '/role/l/software-engineer/india',
+    '/role/r/software-engineer',
+    '/role/r/backend-engineer',
+    '/role/r/full-stack-engineer',
+    '/role/r/frontend-engineer',
+    '/role/r/mobile-engineer',
+  ];
   // after a full page load onto one of the search pages, resume from the NEXT one —
   // restarting at 0 would reload the same page forever
   let searchIdx = SEARCH_PAGES.indexOf(location.pathname) + 1;
@@ -473,15 +559,64 @@ ${CV.name}`;
   }
 
   let applied = 0;
-  const seen = new Set();
+  // Role/location search pages navigate away instead of opening the overlay, so this
+  // script is re-injected constantly. An in-memory `seen` resets each time, which made
+  // it re-open the same location-blocked job every cycle and never reach job #3.
+  // Keep it in localStorage (per day) so a re-injected run resumes where it left off.
+  const SEEN_KEY = 'wfAutoApplySeen';
+  const today = new Date().toDateString();
+  // The runner (Node) passes in every job already opened this run — page storage alone
+  // is not enough: wellfound's role/job pages don't see the /jobs feed's localStorage
+  // across navigations, so the stored list kept collapsing back to one entry.
+  const seen = (() => {
+    const fromRunner = Array.isArray(__CFG.seen) ? __CFG.seen : [];
+    try {
+      const s = JSON.parse(localStorage.getItem(SEEN_KEY) || '{}');
+      return new Set([...fromRunner, ...(s.day === today ? s.hrefs || [] : [])]);
+    } catch (e) { return new Set(fromRunner); }
+  })();
+  // job.href is absolute, location.pathname is not — key both on the /jobs/<id>-slug part
+  const slugOf = (h) => ((h || '').match(/\/jobs\/\d+[^?#]*/) || [h])[0];
+  // Merge with whatever is already stored instead of overwriting: two script instances
+  // overlap across a navigation, and a blind write from the older one wiped the newer
+  // one's entries (storage went back to 1 job after 2 had been tried).
+  const markSeen = (href) => {
+    seen.add(slugOf(href));
+    try {
+      const cur = JSON.parse(localStorage.getItem(SEEN_KEY) || '{}');
+      const all = new Set(cur.day === today ? cur.hrefs || [] : []);
+      for (const s of seen) all.add(s);
+      localStorage.setItem(SEEN_KEY, JSON.stringify({ day: today, hrefs: [...all].slice(-800) }));
+    } catch (e) {}
+  };
+  if (seen.size) log(`(resuming — ${seen.size} jobs already tried today)`);
 
   log(`Starting. DRY_RUN=${CONFIG.DRY_RUN}, max=${CONFIG.MAX_APPLICATIONS}`);
   log('Tip: keep this tab focused and do not navigate away.');
   await sleep(5000); // job cards render after load — don't declare the page empty too early
 
+  // Landed directly on a job page? That means a search page navigated instead of
+  // opening the overlay (role/* pages do this) and the runner re-injected us here.
+  // Apply to this one job, then go back to the feed — do NOT start clicking the
+  // "similar jobs" links on this page, that is how the 2026-08-06 wandering loop began.
+  const onJobPage = location.pathname.match(/^\/jobs\/\d+[^?#]*/);
+  if (onJobPage) {
+    markSeen(onJobPage[0]); // never re-open this job after we return to the feed
+    const title = cleanTitle(document.querySelector('h1')?.textContent || document.title);
+    if (titleOk(title)) {
+      log(`▶ Applying (job page): ${title} | ${location.pathname}`);
+      if (await fillAndSubmit(getCompany(), title, onJobPage[0])) applied++;
+    } else {
+      log(`⏭ job page "${title}" does not match the title filters — skipping`);
+    }
+    log('↩ returning to the jobs feed');
+    if (window.next?.router?.push) window.next.router.push('/jobs'); else location.href = '/jobs';
+    return; // the feed load re-injects a fresh run
+  }
+
   while (applied < CONFIG.MAX_APPLICATIONS) {
     const allRows = findJobRows();
-    const jobs = allRows.filter((j) => !seen.has(j.href) && titleOk(j.title));
+    const jobs = allRows.filter((j) => !seen.has(slugOf(j.href)) && titleOk(j.title));
 
     if (!jobs.length) {
       // Diagnostics so failures are debuggable from the console output
@@ -496,7 +631,7 @@ ${CV.name}`;
       for (let s = 0; s < 6 && !grew; s++) {
         window.scrollTo(0, document.body.scrollHeight);
         await sleep(3000);
-        grew = findJobRows().some((j) => !seen.has(j.href) && titleOk(j.title));
+        grew = findJobRows().some((j) => !seen.has(slugOf(j.href)) && titleOk(j.title));
       }
       if (grew) continue;
 
@@ -507,14 +642,14 @@ ${CV.name}`;
     }
 
     const job = jobs[0];
-    seen.add(job.href);
+    markSeen(job.href);
     log(`▶ Applying: ${job.title} @ ${job.company || '?'} | ${job.href} | ${job.salary || ''}`);
     job.linkEl.scrollIntoView({ block: 'center' });
     await sleep(500);
     job.linkEl.click(); // SPA overlay opens with the "Apply to <Company>" panel
     await sleep(3000);
 
-    const ok = await fillAndSubmit(job.company || getCompany(), job.title);
+    const ok = await fillAndSubmit(job.company || getCompany(), job.title, job.href);
     if (ok) {
       applied++;
       log(`  progress: ${applied}/${CONFIG.MAX_APPLICATIONS}`);
