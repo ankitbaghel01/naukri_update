@@ -71,7 +71,12 @@
     [/remote|work from home|wfh/i, CV.remoteOk],
     [/reloc|move to|shift to|based out of|work from (our )?office|on-?site/i, CV.relocate],
     [/visa|sponsorship|work authorization|legally authorized|right to work|citizen/i, CV.workAuth],
-    [/where are you (based|located)|current location|city/i, CV.location],
+    [/where are you .{0,15}(based|located)|current location|city/i, CV.location],
+    // Specific link fields must come before the combined /link/ catch-all, otherwise a
+    // single "LinkedIn URL" input gets the whole "GitHub: ... | LinkedIn: ..." string.
+    [/\blinkedin\b/i, CV.linkedin],
+    [/\bgithub\b/i, CV.github],
+    [/portfolio|personal website/i, CV.portfolio],
     [/linkedin|github|portfolio|website|link/i, CV.links],
     [/why (do you want|are you interested|this role|this company|us|join)/i,
       `I ship production features end to end. ${CV.highlights[0] || ''}. This role matches my stack directly, and I want to keep building products with real ownership.`],
@@ -107,7 +112,7 @@ I'd like to apply for the ${title || 'Full Stack Developer'} position at ${compa
 
 I'm currently ${CV.currentRole || 'a software developer'}, working daily with ${CV.skills.split(',').slice(0, 8).join(',').trim()}. A recent example of my work: ${CV.highlights[0] || 'shipping production features end to end'}.
 
-${CV.highlights[1] || ''}${CV.highlights[2] ? ' ' + CV.highlights[2] + '.' : ''}
+${CV.highlights[1] ? CV.highlights[1] + '.' : ''}${CV.highlights[2] ? ' ' + CV.highlights[2] + '.' : ''}
 
 I'm interested in this role because the ${title || 'Full Stack Developer'} role matches the stack I work in every day, and I'd get to own features end to end${company ? ' at ' + company : ''}. Happy to walk through any of the above if it's useful.
 

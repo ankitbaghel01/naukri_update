@@ -103,7 +103,7 @@ const SITES = {
 
 const site = SITES[SITE_ARG];
 if (!site) {
-  console.log('Usage: node auto-apply-runner.js <indeed|wellfound> [login|--live]');
+  console.log('Usage: node auto-apply-runner.js <indeed|wellfound|naukri> [login|--live]');
   process.exit(1);
 }
 

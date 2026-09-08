@@ -82,7 +82,7 @@
     [/remote|work from home|wfh/i, CV.remoteOk],
     [/reloc|move to|shift to|based out of|work from (our )?office|commute|on-?site/i, CV.relocate],
     [/e-?mail/i, CV.email], // before location — "Email address" must not match /address/
-    [/where are you (based|located)|current location|city|address/i, CV.location],
+    [/where are you .{0,15}(based|located)|current location|city|address/i, CV.location],
     [/visa|sponsorship|work authorization|legally authorized|right to work|citizen/i, CV.workAuth],
     [/\blinkedin\b/i, CV.linkedin],
     [/\bgithub\b/i, CV.github],
