@@ -55,6 +55,7 @@ public static class AaWin32 {
   [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hWnd);
   [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
   [DllImport("user32.dll")] public static extern int GetWindowTextLength(IntPtr hWnd);
+  [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr hWnd, IntPtr after, int x, int y, int cx, int cy, uint flags);
 
   public static List<IntPtr> ForPids(HashSet<uint> pids) {
     var found = new List<IntPtr>();
@@ -84,6 +85,13 @@ if ($pids.Count -gt 0) {
     if ($cmd -eq 6 -and [AaWin32]::IsIconic($h)) { continue }
     if ($cmd -eq 0 -and -not [AaWin32]::IsWindowVisible($h)) { continue }
     if ($cmd -eq 9 -and [AaWin32]::IsWindowVisible($h) -and -not [AaWin32]::IsIconic($h)) { continue }
+    if ($cmd -eq 9) {
+      # Hidden runs launch Chrome at -32000 so it never flashes on screen. Showing one
+      # therefore has to move it back into view first, or it would "restore" to
+      # coordinates no monitor covers — the original bug this whole file exists to fix.
+      # SWP_NOSIZE 0x1 | SWP_NOZORDER 0x4 | SWP_NOACTIVATE 0x10 = 0x15
+      [void][AaWin32]::SetWindowPos($h, [IntPtr]::Zero, 60, 60, 0, 0, 0x15)
+    }
     [void][AaWin32]::ShowWindow($h, $cmd)
     if ($cmd -eq 9) { [void][AaWin32]::SetForegroundWindow($h) }
     $n++

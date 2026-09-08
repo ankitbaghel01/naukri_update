@@ -195,10 +195,14 @@ function buildInjection() {
       '--disable-backgrounding-occluded-windows', // keep timers full-speed while minimised
       '--disable-renderer-backgrounding',
       '--disable-popup-blocking', // naukri script opens each job in a popup it controls
-      // Force an on-screen origin. Chrome otherwise reuses the bounds saved in the
-      // profile, and this profile still carries the old -32000 position — so the
-      // window would restore off-screen even though it is only minimised now.
-      '--window-position=0,0',
+      // A hidden run launches off-screen, because hiding can only happen once the
+      // window exists — measured as a 1-3s flash of "about:blank - Google Chrome"
+      // before the hide landed. --show and --minimize need a real on-screen origin
+      // (Chrome otherwise reuses the old -32000 bounds saved in the profile).
+      // show-windows.js moves a hidden window back into view before showing it.
+      SHOW_WINDOW || MINIMIZE_ONLY || LOGIN_MODE
+        ? '--window-position=0,0'
+        : '--window-position=-32000,-32000',
     ],
   });
 
