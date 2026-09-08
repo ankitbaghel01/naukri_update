@@ -277,6 +277,9 @@ function buildInjection() {
         return 'missing';
       }, [id, company]);
     } catch (e) {
+      // Say why. A bare "unavailable" gave no way to tell a slow page from a tab that
+      // had been closed out from under the check.
+      log(`  (verification error: ${String(e.message || e).split('\n')[0].slice(0, 90)})`);
       return 'unknown';
     } finally {
       if (page) { VERIFY_PAGES.delete(page); await page.close().catch(() => {}); }
@@ -418,6 +421,10 @@ function buildInjection() {
     const pages = ctx.pages();
     let anyBusy = false;
     for (const p of pages) {
+      // A verification tab is same-origin with the feed, so both close-rules below
+      // match it. Closing it mid-check made verifyInAppliedList() throw and report
+      // "verification unavailable" for an application that had in fact registered.
+      if (VERIFY_PAGES.has(p)) continue;
       if (await isBusy(p)) anyBusy = true;
       // finished smartapply/form tabs: close them so tabs don't pile up
       if (p !== mainPage && /smartapply|\/apply/.test(p.url()) && !(await isBusy(p))) {
