@@ -39,6 +39,7 @@
   const CONFIG = {
     DRY_RUN: true,             // true = open jobs + locate Apply but never click it. Flip to false when ready.
     MAX_APPLICATIONS: 15,      // stop after this many applications this run (tracked across pastes)
+    EXTERNAL_BATCH: 4,         // queue this many "apply on company site" jobs, then yield to the runner
     MIN_DELAY_MS: 8000,        // wait between applications (randomized between min/max)
     MAX_DELAY_MS: 20000,
     geminiKey: __CFG.geminiKey || '',   // optional: Gemini API key for unmatched chatbot questions
@@ -282,7 +283,7 @@
     if (!applyBtn) { log('  ⚠ no Apply button found — skipping.'); return false; }
     // In-page JS can't follow the handoff to the employer's domain (cross-origin),
     // so hand the job to the Node runner, which applies on the company site itself.
-    if (applyBtn === 'external') { log(`  🔗 EXTERNAL | ${job.title} | ${job.href}`); return false; }
+    if (applyBtn === 'external') { log(`  🔗 EXTERNAL | ${job.title} | ${job.href}`); return 'external'; }
     if (applyBtn === 'applied') { log('  already applied — skipping.'); return false; }
 
     if (CONFIG.DRY_RUN) {
@@ -349,7 +350,7 @@
       // read: visible buttons ["2","Save","Apply on company site"].
       if (d && findButtonByText(d, SELECTORS.externalApplyText)) {
         log(`  🔗 EXTERNAL | ${job.title} | ${job.href}`);
-        return false;
+        return 'external';
       }
       const btns = d && d.body ? [...d.querySelectorAll('button')].filter(visible)
         .map((b) => b.textContent.trim()).filter(Boolean).slice(0, 8) : [];
@@ -387,6 +388,7 @@
     return;
   }
 
+  let extQueued = 0;
   while (state.applied < CONFIG.MAX_APPLICATIONS) {
     const cards = [...document.querySelectorAll(SELECTORS.jobCards)].filter(visible);
     let job = null;
@@ -426,10 +428,24 @@
     job.card.scrollIntoView({ block: 'center' });
 
     const ok = await applyInPopup(popup, job);
-    if (ok && !CONFIG.DRY_RUN) {
+    // Strictly true: 'external' is truthy and must not be counted as an application.
+    if (ok === true && !CONFIG.DRY_RUN) {
       state.applied++;
       saveState();
       log(`  progress: ${state.applied}/${CONFIG.MAX_APPLICATIONS}`);
+    }
+    if (ok === 'external') {
+      extQueued++;
+      // The runner applies on the employer's own site, but it can only do that while
+      // this script is idle: its queue drains under !anyBusy, and applyExternal waits
+      // for the next context 'page' event, which would otherwise capture the job popup
+      // this script drives. Most naukri developer listings are external, so a loop that
+      // runs to MAX_APPLICATIONS keeps the script busy and the queue never drains at
+      // all. Hand control back after a small batch instead.
+      if (extQueued >= CONFIG.EXTERNAL_BATCH) {
+        log(`↩ queued ${extQueued} external jobs — yielding so the runner can apply to them.`);
+        break;
+      }
     }
     await humanDelay();
   }
