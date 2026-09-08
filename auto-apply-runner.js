@@ -248,11 +248,14 @@ function buildInjection() {
    * Opens its own tab, registered in VERIFY_PAGES so the apply script is not injected
    * into it, and always closes it.
    */
-  async function verifyInAppliedList(job) {
-    if (!site.appliedListUrl || !job) return 'unknown';
+  async function verifyInAppliedList(job, context) {
+    if (!site.appliedListUrl || !job || !context) return 'unknown';
     let page;
     try {
-      page = await ctx.newPage();
+      // The browser context is taken from the caller's page: `ctx` is created inside
+      // session() and is not in scope here, which made every verification throw
+      // "ctx is not defined" and report a real application as unverified.
+      page = await context.newPage();
       VERIFY_PAGES.add(page);
       await page.goto(site.appliedListUrl, { waitUntil: 'domcontentloaded', timeout: 45000 });
       // the list is client-rendered; wait for a row to exist rather than a fixed sleep
@@ -357,7 +360,7 @@ function buildInjection() {
           const job = pendingJob || { title: 'unknown' };
           // Verify against the site's own applied-list before writing the CSV row, so
           // the CSV records what actually registered rather than what we hoped did.
-          verifyInAppliedList(job).then((v) => {
+          verifyInAppliedList(job, page.context()).then((v) => {
             job.verified = v;
             if (v === 'verified') log(`  ✔ verified — job is in ${SITE_ARG}'s applied list`);
             else if (v === 'missing') log(`  ❌ NOT in ${SITE_ARG}'s applied list — the submission did not register`);
