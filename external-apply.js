@@ -35,13 +35,26 @@ const YES = /^(yes|i agree|agree|i consent|consent|willing|open to|immediately|a
  * can't require() anything. First match wins, so order matters.
  */
 const answerFor = (label, CV) => {
-  const L = String(label || '');
+  // Normalise the label before matching. Real forms label fields as "first_name",
+  // "current-ctc" or "currentCtc" as often as "First Name", and the patterns below are
+  // written with spaces — so a live run reported
+  //   unmatched (7): *first_name, *last_name, current_ctc, expected_ctc, notice_period
+  // for five fields the bank already knew how to answer.
+  // Matched against BOTH forms: splitting camelCase alone would break single words the
+  // patterns rely on ("LinkedIn" -> "Linked In" stops /linkedin/ matching, which the
+  // test suite caught), while matching only the raw label misses snake_case forms.
+  const raw = String(label || '').trim();
+  const normalised = raw
+    .replace(/[_-]+/g, ' ')                      // first_name / current-ctc -> spaced
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')      // currentCtc -> current Ctc
+    .replace(/\s+/g, ' ')
+    .trim();
   const bank = [
     [/first name|given name/i, (CV.name || '').split(' ')[0]],
     [/last name|surname|family name/i, (CV.name || '').split(' ').slice(1).join(' ')],
     [/full name|^name$|your name|candidate name/i, CV.name],
     [/e-?mail/i, CV.email], // before any /address/ pattern
-    [/phone|mobile|contact number|telephone/i, CV.phone],
+    [/phone|mobile|contact\s*(no|number)|telephone/i, CV.phone], // "Enter contact no" is common on Indian ATS forms
     [/linkedin/i, CV.linkedin],
     [/github/i, CV.github],
     [/portfolio|personal (web)?site|website|blog/i, CV.portfolio],
@@ -62,7 +75,7 @@ const answerFor = (label, CV) => {
     [/cover letter|why (do you|are you)|tell us|about yourself|summary|message/i,
       `I'm ${CV.name}, ${CV.currentRole}. ${(CV.highlights && CV.highlights[0]) || ''}`.trim()],
   ];
-  for (const [re, val] of bank) if (re.test(L)) return val == null ? '' : String(val);
+  for (const [re, val] of bank) if (re.test(raw) || re.test(normalised)) return val == null ? '' : String(val);
   return '';
 };
 
