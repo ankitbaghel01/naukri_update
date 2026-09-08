@@ -287,29 +287,42 @@
 
     applyBtn.click();
 
-    const doc = popup.document;
+    // popup.document MUST be re-read on every check. Clicking Apply can navigate the
+    // popup, and a navigation replaces the Document object — the old code captured it
+    // once, so from then on every check ran against a detached document: textContent
+    // never carried the toast and applyBtn.isConnected was false. A genuinely
+    // successful apply therefore reported "could not confirm success", and the
+    // calibration dump printed an empty button list (the tell-tale of a dead
+    // document). Dry runs return before the click, so only live runs ever hit it.
+    const doc = () => popup.document;
+
     // Only the button we actually clicked counts as a state change. Scanning every
     // button for /^applied/i matched unrelated chrome ("Applied filters", an
     // already-applied entry in a similar-jobs rail) and confirmed a success that
     // never happened. If Naukri swaps the node out instead of relabelling it,
     // isConnected goes false and we fall back to the toast text.
-    const confirmed = () =>
-      SELECTORS.appliedToast.test(doc.body.textContent) ||
-      (applyBtn.isConnected && SELECTORS.alreadyAppliedText.test(applyBtn.textContent.trim()));
+    const confirmed = () => {
+      const d = doc();
+      if (!d || !d.body) return false;
+      return SELECTORS.appliedToast.test(d.body.textContent) ||
+        (applyBtn.isConnected && SELECTORS.alreadyAppliedText.test(applyBtn.textContent.trim()));
+    };
 
     // Race the questionnaire drawer against the applied confirmation, whichever
     // lands first. A fixed sleep raced the drawer's render and silently skipped
     // the questions; polling the drawer alone stalled the full timeout on every
     // direct apply, which is the common case.
     const outcome = await waitFor(() => {
-      if (SELECTORS.alreadyAppliedToast.test(doc.body.textContent)) return 'duplicate';
-      const d = doc.querySelector(SELECTORS.chatbot);
-      if (d && visible(d)) return 'chatbot';
+      const d = doc();
+      if (!d || !d.body) return null;
+      if (SELECTORS.alreadyAppliedToast.test(d.body.textContent)) return 'duplicate';
+      const drawer = d.querySelector(SELECTORS.chatbot);
+      if (drawer && visible(drawer)) return 'chatbot';
       return confirmed() ? 'applied' : null;
     }, 10000);
     if (outcome === 'duplicate') { log('  ↩ already applied to this job — not counting it.'); return false; }
     if (outcome === 'chatbot') {
-      const ok = await handleChatbot(doc);
+      const ok = await handleChatbot(doc());
       if (!ok) return false;
     }
 
@@ -321,11 +334,13 @@
       // The confirmation wording is the one thing we could not verify without a real
       // apply. Dump what the page actually said so the regex can be calibrated
       // instead of guessing again.
-      const btns = [...doc.querySelectorAll('button')].filter(visible)
-        .map((b) => b.textContent.trim()).filter(Boolean).slice(0, 8);
+      const d = doc();
+      const btns = d && d.body ? [...d.querySelectorAll('button')].filter(visible)
+        .map((b) => b.textContent.trim()).filter(Boolean).slice(0, 8) : [];
       log('  ⚠ could not confirm success — check the popup.');
+      log(`  🔬 calibration — url: ${d ? d.location.href.slice(0, 120) : '(no document)'}`);
       log(`  🔬 calibration — visible buttons: ${JSON.stringify(btns)}`);
-      log(`  🔬 calibration — page text: "${doc.body.textContent.replace(/\s+/g, ' ').trim().slice(0, 300)}"`);
+      log(`  🔬 calibration — page text: "${d && d.body ? d.body.textContent.replace(/\s+/g, ' ').trim().slice(0, 300) : ''}"`);
     }
     return !!success;
   }
