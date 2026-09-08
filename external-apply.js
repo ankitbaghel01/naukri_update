@@ -106,6 +106,10 @@ const COLLECT = () => {
 async function fillFields(page, CV, resumePath) {
   const fields = await page.evaluate(COLLECT);
   const report = [];
+  // Labels the answer bank had nothing for. Without this the misses were invisible —
+  // a "filled 3/6" line gave no way to tell whether the 3 gaps were optional extras
+  // or a required field that would sink the submission.
+  const missed = [];
   for (const f of fields) {
     const loc = page.locator(`[data-aa-i="${f.i}"]`).first();
     try {
@@ -128,7 +132,7 @@ async function fillFields(page, CV, resumePath) {
         continue;
       }
       const answer = answerFor(f.label, CV);
-      if (!answer) continue;
+      if (!answer) { missed.push((f.required ? '*' : '') + (f.label || f.type).slice(0, 30)); continue; }
       if (f.type === 'select') {
         const match = f.options.find((o) => o.toLowerCase().includes(String(answer).toLowerCase())) ||
                       f.options.find((o) => YES.test(o));
@@ -139,7 +143,7 @@ async function fillFields(page, CV, resumePath) {
       report.push(`${f.label.slice(0, 25)}=${String(answer).slice(0, 25)}`);
     } catch (e) { /* one stubborn field must not abort the form */ }
   }
-  return { count: fields.length, report };
+  return { count: fields.length, report, missed };
 }
 
 const SUBMIT_RE = /^(submit|submit application|apply|apply now|send application|send|finish|complete)$/i;
@@ -228,9 +232,11 @@ async function applyExternal(ctx, job, { CV, live, resumePath, log = () => {} })
     // up to 3 passes: fill → submit → (next step of a multi-step form)
     let filledTotal = 0;
     for (let step = 0; step < 3; step++) {
-      const { count, report } = await fillFields(target, CV, resumePath);
+      const { count, report, missed } = await fillFields(target, CV, resumePath);
       filledTotal += report.length;
       if (report.length) log(`    filled ${report.length}/${count}: ${report.slice(0, 6).join(', ')}`);
+      // "*" marks a required field — those are the ones that will block a real submit.
+      if (missed.length) log(`    unmatched (${missed.length}): ${missed.slice(0, 8).join(', ')}`);
 
       if (!live) {
         const sub = await findSubmit(target);
