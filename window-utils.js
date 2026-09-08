@@ -23,6 +23,14 @@
  * Chrome running at the same time is never affected.
  */
 const { execFile } = require("child_process");
+const path = require("path");
+
+/**
+ * While this file exists, running scripts stop hiding their windows. show-windows.js
+ * creates it, so a browser brought up to watch is not swept back out of sight a few
+ * seconds later; `node show-windows.js --hide` removes it and hiding resumes.
+ */
+const SHOW_FLAG = path.join(__dirname, ".show-windows");
 
 // Embed the path as a PowerShell single-quoted literal. It cannot be passed as a
 // parameter: `powershell -Command <script>` does not bind trailing arguments to a
@@ -110,4 +118,5 @@ module.exports = {
   minimizeBrowserWindows,
   hideBrowserWindows,
   restoreBrowserWindows,
+  SHOW_FLAG,
 };

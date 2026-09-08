@@ -1,19 +1,24 @@
 /**
- * Bring the automation browser windows back on screen.
+ * Bring the automation browser windows back on screen, or send them away again.
  *
- * Runs are hidden by default — off screen and out of the taskbar — so there is
- * nothing to click when you want to watch one. This puts them back.
+ * Runs are hidden by default — off screen and out of the taskbar — and a running
+ * script keeps sweeping any new window (job popups, application tabs) out of sight,
+ * so there is nothing to click when you want to watch one.
  *
- *   node show-windows.js            restore every automation profile's windows
- *   node show-windows.js naukri     restore just the naukri apply browser
- *   node show-windows.js wellfound  restore just the wellfound browser
+ *   node show-windows.js                  show every automation browser, and keep it shown
+ *   node show-windows.js wellfound        show just one (naukri | wellfound | indeed | refresh)
+ *   node show-windows.js --hide           hide them again and resume automatic hiding
  *
- * They stay visible: nothing re-hides a window you have deliberately brought up.
- * To start a run visible in the first place, pass --show:
- *   node auto-apply-runner.js naukri --show
+ * Showing writes a flag file (.show-windows) that pauses the hide sweep, otherwise a
+ * restored window would be swept away again within seconds. --hide clears it.
  */
+const fs = require("fs");
 const path = require("path");
-const { restoreBrowserWindows } = require("./window-utils");
+const {
+  restoreBrowserWindows,
+  hideBrowserWindows,
+  SHOW_FLAG,
+} = require("./window-utils");
 
 const PROFILES = {
   naukri: ".naukri-apply-profile",
@@ -23,14 +28,37 @@ const PROFILES = {
 };
 
 (async () => {
-  const which = (process.argv[2] || "").toLowerCase();
-  const names = which ? [which] : Object.keys(PROFILES);
+  const args = process.argv.slice(2);
+  const hideAgain = args.includes("--hide");
+  const which = (args.find((a) => !a.startsWith("--")) || "").toLowerCase();
+
   if (which && !PROFILES[which]) {
     console.log(
       `Unknown profile "${which}". Options: ${Object.keys(PROFILES).join(", ")}`,
     );
     process.exit(1);
   }
+  const names = which ? [which] : Object.keys(PROFILES);
+
+  if (hideAgain) {
+    try {
+      fs.unlinkSync(SHOW_FLAG);
+    } catch (e) {}
+    let n = 0;
+    for (const name of names)
+      n += await hideBrowserWindows(path.join(__dirname, PROFILES[name]));
+    console.log(
+      n
+        ? `hid ${n} window(s); automatic hiding resumed`
+        : "nothing visible to hide; automatic hiding resumed",
+    );
+    return;
+  }
+
+  // Set the flag BEFORE restoring, so a sweep running right now does not undo it.
+  try {
+    fs.writeFileSync(SHOW_FLAG, new Date().toISOString());
+  } catch (e) {}
   let total = 0;
   for (const name of names) {
     const n = await restoreBrowserWindows(path.join(__dirname, PROFILES[name]));
@@ -39,6 +67,9 @@ const PROFILES = {
   }
   if (!total)
     console.log(
-      "No hidden automation windows found — nothing running, or already visible.",
+      "No automation windows found — nothing is running, or they are already visible.",
     );
+  console.log(
+    "Automatic hiding is PAUSED. Run `node show-windows.js --hide` to hide them again.",
+  );
 })();

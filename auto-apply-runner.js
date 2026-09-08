@@ -15,7 +15,7 @@
 const path = require('path');
 const fs = require('fs');
 const { CV, geminiKey, resumePath: RESUME_PATH } = require('./config'); // personal data from .env
-const { minimizeBrowserWindows, hideBrowserWindows } = require('./window-utils');
+const { minimizeBrowserWindows, hideBrowserWindows, SHOW_FLAG } = require('./window-utils');
 const { applyExternal } = require('./external-apply'); // "Apply on company site" jobs, driven from Node
 // stealth patches the fingerprint leaks reCAPTCHA uses to flag automation; falls back to plain playwright
 let chromium;
@@ -206,18 +206,27 @@ function buildInjection() {
   // button then "restored" it to coordinates no monitor covers, so the run could
   // never be watched. Minimise instead: same out-of-the-way behaviour, but one
   // click on the taskbar brings it up. Pass --show to leave it on screen.
+  // Hiding once at launch was not enough: the naukri script opens a job popup per job,
+  // external applies open their own tabs, and each new window appears on screen. Sweep
+  // continuously instead, so a run genuinely stays out of sight.
+  //
+  // The sweep is paused while show-windows.js has set its flag, so bringing the browser
+  // up to watch it does not turn into a fight with a timer.
+  let sweepTimer = null;
   const tuckAway = async (ctx) => {
     if (LOGIN_MODE || SHOW_WINDOW) return;
     const stow = MINIMIZE_ONLY ? minimizeBrowserWindows : hideBrowserWindows;
+    const dir = path.join(__dirname, site.profile);
+    const sweep = async () => {
+      if (fs.existsSync(SHOW_FLAG)) return; // user asked to see it
+      await stow(dir).catch(() => {});
+    };
     await new Promise((r) => setTimeout(r, 1200)); // let the window actually exist
-    await stow(path.join(__dirname, site.profile));
-    // The naukri script opens a job popup after the run starts; tuck that away too,
-    // but only these two times — re-minimising on a timer would fight the user the
-    // moment they clicked the taskbar to look.
-    ctx.once('page', async () => {
-      await new Promise((r) => setTimeout(r, 1200));
-      await stow(path.join(__dirname, site.profile));
-    });
+    await sweep();
+    if (sweepTimer) clearInterval(sweepTimer);
+    sweepTimer = setInterval(() => { sweep(); }, 4000);
+    sweepTimer.unref?.();
+    ctx.once('close', () => { if (sweepTimer) clearInterval(sweepTimer); });
   };
 
   if (LOGIN_MODE) {
