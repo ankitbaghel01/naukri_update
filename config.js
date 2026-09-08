@@ -35,6 +35,7 @@ const CV = {
   company: g('COMPANY') || (g('CURRENT_ROLE').split(' at ')[1] || '').split(' (')[0],
   education: g('EDUCATION'),
   yearsOfExperience: g('YEARS_EXPERIENCE'),
+  yearsNumber: (g('YEARS_EXPERIENCE').match(/\d+/) || ['1'])[0], // numeric-only chatbot fields
   skills: g('SKILLS'),
   highlights: g('HIGHLIGHTS').split('||').map((s) => s.trim()).filter(Boolean),
   // application answers
@@ -60,5 +61,8 @@ const CV = {
 const CREDS = { email: g('GOOGLE_EMAIL') || g('EMAIL'), password: g('GOOGLE_PASSWORD') };
 const geminiKey = g('GEMINI_KEY');
 const naukriProfileUrl = g('NAUKRI_PROFILE_URL', 'https://www.naukri.com/mnjuser/profile');
+// The PDF uploaded to the Naukri profile and attached to external application forms.
+// Relative names resolve against the repo folder; an absolute path is used as-is.
+const resumePath = path.resolve(__dirname, g('RESUME_FILE', 'Ankit Baghel.pdf'));
 
-module.exports = { CV, CREDS, geminiKey, naukriProfileUrl };
+module.exports = { CV, CREDS, geminiKey, naukriProfileUrl, resumePath };

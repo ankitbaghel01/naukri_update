@@ -14,5 +14,12 @@ apply-state-*.json
 # resume / personal docs
 *.pdf
 
+# machine-specific launchers (contain absolute local paths)
+*.vbs
+.gitignore
+# local tooling / scratch
+.claude/
+naukri_update/
+
 # deps
 node_modules/

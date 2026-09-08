@@ -1,15 +1,18 @@
 {
-  "name": "naukri-update",
+  "name": "auto-apply",
   "version": "1.0.0",
-  "description": "Keeps a Naukri profile fresh by toggling a trailing dot on the resume headline",
   "main": "naukri-profile-refresh.js",
   "scripts": {
     "refresh": "node naukri-profile-refresh.js",
     "login": "node naukri-profile-refresh.js login"
   },
+  "keywords": ["naukri", "playwright", "automation"],
   "author": "Ankit Baghel",
   "license": "ISC",
+  "description": "Keeps your Naukri profile recently-updated by toggling the resume headline on a schedule",
   "dependencies": {
-    "playwright-core": "^1.61.1"
+    "playwright-core": "^1.61.1",
+    "playwright-extra": "^4.3.6",
+    "puppeteer-extra-plugin-stealth": "^2.11.2"
   }
 }

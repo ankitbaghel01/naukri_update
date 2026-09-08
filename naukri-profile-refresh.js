@@ -6,13 +6,17 @@
  * Debug:   node naukri-profile-refresh.js login                           (visible Chrome window)
  *
  * Login is automatic: if the Naukri session is gone, it signs in with the
- * Google account below. State lives in the headline itself:
- * ends with "." → remove it, else add it.
+ * Google account below. State lives in the headline itself — trailing dots
+ * cycle each run: "" → "." → ".." → "" → ...
+ *
+ * Also re-uploads the resume PDF whenever the "Uploaded on" date shown on
+ * the profile is not today's date.
  */
 const { chromium } = require('playwright-core');
 const path = require('path');
 const fs = require('fs');
-const { CREDS, naukriProfileUrl } = require('./config'); // credentials + profile URL come from .env, never hard-coded
+const { CREDS, naukriProfileUrl, resumePath } = require('./config'); // credentials + profile URL come from .env, never hard-coded
+const { nextHeadline, uploadedToday } = require('./naukri-helpers');
 
 const PROFILE_URL = naukriProfileUrl;
 const LOGIN_URL = `https://www.naukri.com/nlogin/login?URL=${PROFILE_URL}`;
@@ -20,7 +24,11 @@ const LOGIN_URL = `https://www.naukri.com/nlogin/login?URL=${PROFILE_URL}`;
 const PROFILE_DIR = path.join(__dirname, '.naukri-chrome-profile');
 const LOG_FILE = path.join(__dirname, 'naukri-refresh.log');
 const ERROR_SHOT = path.join(__dirname, 'naukri-refresh-error.png');
+const RESUME_PATH = resumePath; // set RESUME_FILE in .env to change which PDF is uploaded
 const LOGIN_MODE = process.argv[2] === 'login';
+// Re-upload the CV even when the profile already shows today's date — needed when
+// you swap in a different PDF, since the date check alone would skip it.
+const FORCE_CV = process.argv.includes('--force-cv');
 
 const log = (msg) => {
   const line = `[${new Date().toLocaleString()}] ${msg}`;
@@ -120,7 +128,8 @@ async function googleLogin(ctx, page) {
     const textarea = page.locator('#resumeHeadlineTxt');
     await textarea.waitFor({ timeout: 15000 });
     const current = (await textarea.inputValue()).trimEnd();
-    const updated = current.endsWith('.') ? current.slice(0, -1) : current + '.';
+    const dots = current.length - current.replace(/\.+$/, '').length;
+    const updated = nextHeadline(current);
 
     await textarea.fill(updated);
     await page.getByRole('button', { name: /^save$/i }).first().click();
@@ -136,7 +145,45 @@ async function googleLogin(ctx, page) {
       throw new Error(`save did not stick — server headline is "${saved.slice(0, 60)}", expected "${updated.slice(0, 60)}"`);
     }
 
-    log(`OK: headline ${current.endsWith('.') ? 'dot removed' : 'dot added'} (verified) → "${updated.slice(0, 60)}"`);
+    const dotMsg = dots >= 2 ? 'dots cleared' : `dot ${dots + 1} added`;
+
+    // ---- resume re-upload: only when the profile's "Uploaded on" date isn't today ----
+    let cvMsg = 'cv up-to-date';
+    // Read the whole page and parse the date right after "Uploaded on" — scoping to
+    // one element was unreliable, and testing today's date against the surrounding
+    // block matched the profile's "last updated" date (which this very script sets
+    // to today), so the re-upload never fired.
+    // The resume widget renders after domcontentloaded, so wait for it to appear
+    // before reading — reading straight after the reload returned a page with no
+    // "Uploaded on" text at all and failed verification on a good upload.
+    const pageText = async () => {
+      await page.getByText(/Uploaded on/i).first().waitFor({ timeout: 30000 }).catch(() => {});
+      return page.locator('body').innerText({ timeout: 30000 }).catch(() => '');
+    };
+    if (FORCE_CV || !uploadedToday(await pageText())) {
+      if (!fs.existsSync(RESUME_PATH)) throw new Error(`resume file missing: ${RESUME_PATH}`);
+      await page.locator('#attachCV, input[type="file"]').first().setInputFiles(RESUME_PATH);
+      // verify from the server: reload and re-read the uploaded-on date. With
+      // --force-cv the date is already today, so check the FILENAME instead —
+      // that's the only proof the new PDF actually replaced the old one.
+      await page.waitForTimeout(10000);
+      await page.goto(PROFILE_URL, { waitUntil: 'domcontentloaded', timeout: 60000 });
+      const after = await pageText();
+      // Match the full filename, not the stem: "Ankit Baghel" alone also matches the
+      // OLD "Ankit Baghel Resume-1.pdf", so a failed upload would verify clean.
+      // Naukri may append "-1" before the extension on re-upload, so allow that.
+      const base = path.basename(RESUME_PATH);
+      const stem = path.basename(RESUME_PATH, path.extname(RESUME_PATH));
+      const nameRe = new RegExp(`${stem.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(-\\d+)?\\${path.extname(RESUME_PATH)}`, 'i');
+      const ok = FORCE_CV ? nameRe.test(after) : uploadedToday(after);
+      if (!ok) {
+        const shown = (/Uploaded on[^\n]*/i.exec(after) || ['(no "Uploaded on" text found)'])[0];
+        throw new Error(`cv upload did not stick — profile shows "${shown.slice(0, 80)}"`);
+      }
+      cvMsg = `cv re-uploaded (verified: ${base})`;
+    }
+
+    log(`OK: headline ${dotMsg} (verified), ${cvMsg} → "${updated.slice(0, 60)}"`);
   } catch (err) {
     const pages = ctx.pages();
     for (let i = 0; i < pages.length; i++) {
