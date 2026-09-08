@@ -268,7 +268,7 @@ function buildInjection() {
 
       if (site.submittedRe.test(text)) {
         submitted++;
-        log(`==> ${submitted}/${TARGET} this run (${dayState.count + 1}/${DAILY_CAP} today)`);
+        log(`==> ${submitted}/${TARGET} this run (${dayState.count + (LIVE ? 1 : 0)}/${DAILY_CAP} today)`);
         if (LIVE) { // dry runs don't pollute the CSV or the daily count
           bumpDayCount();
           try { logApplication(pendingJob || { title: 'unknown' }); } catch (e) { log('CSV write failed: ' + e.message); }
