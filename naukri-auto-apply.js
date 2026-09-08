@@ -40,8 +40,12 @@
     DRY_RUN: true,             // true = open jobs + locate Apply but never click it. Flip to false when ready.
     MAX_APPLICATIONS: 15,      // stop after this many applications this run (tracked across pastes)
     EXTERNAL_BATCH: 4,         // queue this many "apply on company site" jobs, then yield to the runner
-    MIN_DELAY_MS: 8000,        // wait between applications (randomized between min/max)
-    MAX_DELAY_MS: 20000,
+    // Wait between applications, randomised between min/max. Raised from 8-20s: an
+    // hourly run only needs ~10 applications, so there is a whole hour to spread them
+    // over, and a steady application every 10s is a far stronger automation signal
+    // than anything the stealth plugin can hide. 10 jobs now take ~8-20 minutes.
+    MIN_DELAY_MS: 45000,
+    MAX_DELAY_MS: 120000,
     geminiKey: __CFG.geminiKey || '',   // optional: Gemini API key for unmatched chatbot questions
 
     // Job titles to apply to (case-insensitive substring match on the job title)

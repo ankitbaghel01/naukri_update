@@ -35,6 +35,13 @@ process.on('uncaughtException', (e) => console.log(`[${new Date().toLocaleString
 const SITE_ARG = process.argv[2];
 const LOGIN_MODE = process.argv.includes('login');
 const LIVE = process.argv.includes('--live');
+// --scheduled marks a run started by Task Scheduler rather than by hand. Such runs
+// wait a random 0-14 minutes before starting and refuse to run outside daytime hours,
+// because a burst of applications at exactly HH:00:00, around the clock, is the most
+// obviously non-human thing an hourly job can do.
+const SCHEDULED = process.argv.includes('--scheduled');
+const ACTIVE_FROM = 9;   // 09:00
+const ACTIVE_UNTIL = 23; // 23:00 (exclusive)
 // Window handling: hidden by default (off screen and out of the taskbar, so a run is
 // invisible), --minimize to keep it in the taskbar, --show to leave it on screen.
 // `node show-windows.js` brings a hidden window back.
@@ -87,7 +94,7 @@ const SITES = {
     // (wfAutoApplySeen), so the runner has no key to reset here.
     storeKey: null,
     dailyCap: 50,
-    perRun: 30, // apply to 30 jobs in one go (still bounded by the 50/day cap)
+    perRun: 10, // 10 per hourly run; the 50/day cap still decides when the day ends
   },
   naukri: {
     script: 'naukri-auto-apply.js',
@@ -108,6 +115,7 @@ const SITES = {
     submittedRe: /✅ applied|DRY_RUN — would click/,
     storeKey: 'autoApplyNaukri',
     dailyCap: 20,
+    perRun: 10, // 10 per hourly run; the 20/day cap still decides when the day ends
     // ~85-90% of Naukri dev listings are "Apply on company site" — follow them
     // onto the employer's own form instead of skipping them.
     externalApply: true,
@@ -116,7 +124,7 @@ const SITES = {
 
 const site = SITES[SITE_ARG];
 if (!site) {
-  console.log('Usage: node auto-apply-runner.js <indeed|wellfound|naukri> [login|--live] [--show|--minimize]');
+  console.log('Usage: node auto-apply-runner.js <indeed|wellfound|naukri> [login|--live] [--show|--minimize] [--scheduled]');
   process.exit(1);
 }
 
@@ -182,6 +190,16 @@ function buildInjection() {
 }
 
 (async () => {
+  if (SCHEDULED && !LOGIN_MODE) {
+    const hour = new Date().getHours();
+    if (hour < ACTIVE_FROM || hour >= ACTIVE_UNTIL) {
+      log(`Outside active hours (${ACTIVE_FROM}:00-${ACTIVE_UNTIL}:00) — skipping this run.`);
+      return;
+    }
+    const jitterMs = Math.floor(Math.random() * 14 * 60 * 1000);
+    log(`Scheduled run: waiting ${Math.round(jitterMs / 60000)} min before starting.`);
+    await new Promise((r) => setTimeout(r, jitterMs));
+  }
   if (!LOGIN_MODE && TARGET <= 0) {
     log(`Daily cap of ${DAILY_CAP} applications already reached (${dayState.count} today) — exiting.`);
     return;
