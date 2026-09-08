@@ -73,6 +73,11 @@ const SITES = {
       'https://wellfound.com/role/r/mobile-engineer',
     ],
     loginUrl: 'https://wellfound.com/login',
+    // Wellfound's own record of what was submitted. Checked after every live apply:
+    // the in-page "Applied" stamp only reflects the DOM the apply flow just touched,
+    // so it cannot tell a real submission from one that looked fine and never
+    // registered. /jobs/applied redirects here.
+    appliedListUrl: 'https://wellfound.com/jobs/applications',
     injectOn: (url) => /wellfound\.com/.test(url),
     submittedRe: /application sent|DRY_RUN — would click/i,
     // The wellfound script manages its own per-day seen-list under its own key
@@ -137,14 +142,19 @@ const matchSkills = (t) => { const l = t.toLowerCase(); return SKILLS.filter((s)
 const csvRow = (vals) => vals.map((v) => '"' + String(v || '').replace(/"/g, '""').replace(/\s+/g, ' ').trim() + '"').join(',') + '\n';
 function logApplication(job) {
   // one-time migration: archive a CSV written before the Job Link column existed
-  if (fs.existsSync(CSV_FILE) && !fs.readFileSync(CSV_FILE, 'utf8').split('\n')[0].includes('Job Link')) {
-    fs.renameSync(CSV_FILE, path.join(__dirname, 'applications-old.csv'));
+  // Also re-archive when the Verified column was added, so older rows (which carry
+  // no verification status) are not silently read as unverified.
+  if (fs.existsSync(CSV_FILE)) {
+    const header = fs.readFileSync(CSV_FILE, 'utf8').split('\n')[0];
+    if (!header.includes('Job Link') || !header.includes('Verified')) {
+      fs.renameSync(CSV_FILE, path.join(__dirname, 'applications-old.csv'));
+    }
   }
   if (!fs.existsSync(CSV_FILE)) {
     // ﻿ BOM so Excel renders ₹/– correctly
-    fs.writeFileSync(CSV_FILE, '﻿' + csvRow(['Date', 'Site', 'Role', 'Company', 'CTC/Salary', 'Skills', 'Job Link', 'Job Description']));
+    fs.writeFileSync(CSV_FILE, '﻿' + csvRow(['Date', 'Site', 'Role', 'Company', 'CTC/Salary', 'Skills', 'Job Link', 'Verified', 'Job Description']));
   }
-  fs.appendFileSync(CSV_FILE, csvRow([new Date().toLocaleString(), SITE_ARG, job.title, job.company, job.salary, job.skills, job.link, job.jd]));
+  fs.appendFileSync(CSV_FILE, csvRow([new Date().toLocaleString(), SITE_ARG, job.title, job.company, job.salary, job.skills, job.link, job.verified || 'n/a', job.jd]));
 }
 
 // Patch the console script: our DRY_RUN flag, our per-run target, and a busy-guard
@@ -223,10 +233,55 @@ function buildInjection() {
   let searchIdx = 0;
   let pendingJob = null; // details of the job currently being applied to, for the CSV
   const externalQueue = [];              // "Apply on company site" jobs, handled in Node
+  // Tabs opened purely to read the site's applied-list. They are on the same origin as
+  // the feed, so without this the supervisor would inject the apply script into them.
+  const VERIFY_PAGES = new Set();
   const externalSeen = new Set();
   const extStats = { applied: 0, skipped: 0, failed: 0 };
 
   const isBusy = (p) => p.evaluate('!!window.__aaBusy').catch(() => false);
+
+  /**
+   * Look the job up in the site's own applied-list after submitting it.
+   * Returns 'verified' | 'missing' | 'unknown' ('unknown' when the check itself could
+   * not run, which must never be reported as a failed application).
+   * Opens its own tab, registered in VERIFY_PAGES so the apply script is not injected
+   * into it, and always closes it.
+   */
+  async function verifyInAppliedList(job) {
+    if (!site.appliedListUrl || !job) return 'unknown';
+    let page;
+    try {
+      page = await ctx.newPage();
+      VERIFY_PAGES.add(page);
+      await page.goto(site.appliedListUrl, { waitUntil: 'domcontentloaded', timeout: 45000 });
+      // the list is client-rendered; wait for a row to exist rather than a fixed sleep
+      await page.waitForFunction(
+        () => /Ongoing|Archived|No applications/i.test(document.body.innerText),
+        { timeout: 30000 }
+      ).catch(() => {});
+      await page.waitForTimeout(2500);
+      const id = ((job.link || '').match(/\/jobs\/(\d+)/) || [])[1] || '';
+      const company = (job.company || '').trim();
+      return await page.evaluate(([id, company]) => {
+        const html = document.body.innerHTML;
+        const text = document.body.innerText;
+        if (!/Ongoing|Archived|No applications/i.test(text)) return 'unknown'; // page never rendered
+        // The job id is the strongest signal; the company name is the fallback for
+        // rows that link by slug only.
+        if (id && html.includes(id)) return 'verified';
+        // Plain substring match: a company name is literal text, and building a
+        // regex from it only invited escaping bugs.
+        if (company.length > 2 && text.toLowerCase().includes(company.toLowerCase())) return 'verified';
+        if (!id && !company) return 'unknown'; // nothing to match on
+        return 'missing';
+      }, [id, company]);
+    } catch (e) {
+      return 'unknown';
+    } finally {
+      if (page) { VERIFY_PAGES.delete(page); await page.close().catch(() => {}); }
+    }
+  }
 
   // Every full navigation wipes window.__aaBusy, so a page that keeps navigating
   // (role/* search pages navigate on every job click) used to get a fresh script
@@ -296,12 +351,22 @@ function buildInjection() {
         log(`==> ${submitted}/${TARGET} this run (${dayState.count + (LIVE ? 1 : 0)}/${DAILY_CAP} today)`);
         if (LIVE) { // dry runs don't pollute the CSV or the daily count
           bumpDayCount();
-          try { logApplication(pendingJob || { title: 'unknown' }); } catch (e) { log('CSV write failed: ' + e.message); }
+          const job = pendingJob || { title: 'unknown' };
+          // Verify against the site's own applied-list before writing the CSV row, so
+          // the CSV records what actually registered rather than what we hoped did.
+          verifyInAppliedList(job).then((v) => {
+            job.verified = v;
+            if (v === 'verified') log(`  ✔ verified — job is in ${SITE_ARG}'s applied list`);
+            else if (v === 'missing') log(`  ❌ NOT in ${SITE_ARG}'s applied list — the submission did not register`);
+            else log('  ? verification unavailable — CSV row marked unverified');
+            try { logApplication(job); } catch (e) { log('CSV write failed: ' + e.message); }
+          });
         }
         pendingJob = null;
       }
     });
     page.on('load', async () => {
+      if (VERIFY_PAGES.has(page)) return; // verification tab: same origin, must stay untouched
       if (!site.injectOn(page.url())) return;
       lastActivity = Date.now();
       // daily reset of the console script's submit counter (persists in localStorage)
