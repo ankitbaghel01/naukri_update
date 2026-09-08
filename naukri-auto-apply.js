@@ -334,6 +334,22 @@
   log(`Starting. DRY_RUN=${CONFIG.DRY_RUN}, max=${CONFIG.MAX_APPLICATIONS}, applied so far: ${state.applied}`);
   if (!/naukri\./.test(location.hostname)) { log('⚠ Open a naukri.com job search first.'); return; }
 
+  // Naukri renders the results list client-side, so the cards are not in the DOM
+  // at injection time. Without this wait the first loop pass saw 0 cards, found no
+  // "Next" button either, and exited with "No more pages" a second after starting.
+  const waitForCards = async (timeoutMs = 30000) => {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      if ([...document.querySelectorAll(SELECTORS.jobCards)].filter(visible).length) return true;
+      await sleep(500);
+    }
+    return false;
+  };
+  if (!(await waitForCards())) {
+    log('No job cards rendered after 30s — search page may have changed or been blocked.');
+    return;
+  }
+
   const popup = window.open('about:blank', 'naukriApplyPopup', 'width=1250,height=900');
   if (!popup) {
     log('🚫 POPUP BLOCKED. Allow popups for naukri.com (address-bar icon → Always allow), then paste again.');
