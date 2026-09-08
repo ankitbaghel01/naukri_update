@@ -75,7 +75,9 @@ const SITES = {
     loginUrl: 'https://wellfound.com/login',
     injectOn: (url) => /wellfound\.com/.test(url),
     submittedRe: /application sent|DRY_RUN — would click/i,
-    storeKey: null, // wellfound script keeps no localStorage state
+    // The wellfound script manages its own per-day seen-list under its own key
+    // (wfAutoApplySeen), so the runner has no key to reset here.
+    storeKey: null,
     dailyCap: 50,
     perRun: 30, // apply to 30 jobs in one go (still bounded by the 50/day cap)
   },

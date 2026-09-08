@@ -340,6 +340,17 @@
       // apply. Dump what the page actually said so the regex can be calibrated
       // instead of guessing again.
       const d = doc();
+      // An external job can render a generic "Apply" before its real
+      // "Apply on company site" control exists, so the pre-click external check
+      // sometimes passes too early and we click the wrong button. Re-check now:
+      // if the page is in fact external, hand it to the runner's external queue
+      // (which applies on the employer's own site) instead of burning it as an
+      // unexplained failure. Observed live on fafadia-tech, whose calibration dump
+      // read: visible buttons ["2","Save","Apply on company site"].
+      if (d && findButtonByText(d, SELECTORS.externalApplyText)) {
+        log(`  🔗 EXTERNAL | ${job.title} | ${job.href}`);
+        return false;
+      }
       const btns = d && d.body ? [...d.querySelectorAll('button')].filter(visible)
         .map((b) => b.textContent.trim()).filter(Boolean).slice(0, 8) : [];
       log('  ⚠ could not confirm success — check the popup.');

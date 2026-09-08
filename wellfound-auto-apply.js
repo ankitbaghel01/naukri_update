@@ -568,7 +568,10 @@ ${CV.name}`;
   // script is re-injected constantly. An in-memory `seen` resets each time, which made
   // it re-open the same location-blocked job every cycle and never reach job #3.
   // Keep it in localStorage (per day) so a re-injected run resumes where it left off.
-  const SEEN_KEY = 'wfAutoApplySeen';
+  // Namespaced by mode. markSeen() runs whether or not this is a dry run, so with a
+  // single key every job a dry run walked was skipped by later live runs — the same
+  // way the naukri script locked 49 live jobs out of reach.
+  const SEEN_KEY = CONFIG.DRY_RUN ? 'wfAutoApplySeen:dry' : 'wfAutoApplySeen';
   const today = new Date().toDateString();
   // The runner (Node) passes in every job already opened this run — page storage alone
   // is not enough: wellfound's role/job pages don't see the /jobs feed's localStorage
