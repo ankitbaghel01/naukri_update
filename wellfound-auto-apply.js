@@ -584,7 +584,10 @@ ${CV.name}`;
     } catch (e) { return new Set(fromRunner); }
   })();
   // job.href is absolute, location.pathname is not — key both on the /jobs/<id>-slug part
-  const slugOf = (h) => ((h || '').match(/\/jobs\/\d+[^?#]*/) || [h])[0];
+  // Numeric job id only, on both sides of the comparison: the runner seeds ids read
+  // from the applied list (/jobs/4662968) while feed links carry the title too
+  // (/jobs/4662968-software-engineer), and a full-slug key never matched those.
+  const slugOf = (h) => { const m = (h || '').match(/\/jobs\/(\d+)/); return m ? '/jobs/' + m[1] : (h || ''); };
   // Merge with whatever is already stored instead of overwriting: two script instances
   // overlap across a navigation, and a blind write from the older one wiped the newer
   // one's entries (storage went back to 1 job after 2 had been tried).

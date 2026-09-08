@@ -264,10 +264,13 @@ function buildInjection() {
         { timeout: 30000 }
       ).catch(() => {});
       await page.waitForTimeout(2500);
+      // Applied rows link as /jobs/applications/<applicationId>-<jobId>; the job id is
+      // the second number. An earlier version matched /jobs/<digits>, which never fires
+      // on this page and silently seeded nothing.
       return await page.evaluate(() =>
-        [...new Set([...document.querySelectorAll('a[href*="/jobs/"]')]
-          .map((a) => (a.getAttribute('href') || '').match(/\/jobs\/\d+[^?#]*/))
-          .filter(Boolean).map((m) => m[0]))]
+        [...new Set([...document.querySelectorAll('a[href*="/jobs/applications/"]')]
+          .map((a) => (a.getAttribute('href') || '').match(/\/jobs\/applications\/\d+-(\d+)/))
+          .filter(Boolean).map((m) => '/jobs/' + m[1]))]
       );
     } catch (e) {
       log(`  (could not read applied list: ${String(e.message || e).split(String.fromCharCode(10))[0].slice(0, 80)})`);
@@ -349,7 +352,11 @@ function buildInjection() {
         const atParts = main.split(' @ ');
         const company = atParts.length > 1 ? atParts.pop() : ''; // company is after the LAST ' @ ' — titles may contain '@'
         const title = atParts.join(' @ ');
-        const slug = ((link || main).match(/\/jobs\/\d+[^?#\s]*/) || [])[0];
+        // Key on the numeric job id alone. Keying on the full slug meant an id seeded
+        // from the applied list (/jobs/4662968) never matched a feed link
+        // (/jobs/4662968-software-engineer), so seeding had no effect.
+        const idm = (link || main).match(/\/jobs\/(\d+)/);
+        const slug = idm ? '/jobs/' + idm[1] : undefined;
         if (slug) seenJobs.add(slug); // page storage is wiped across navigations; Node keeps it
         pendingJob = { title: title.trim(), company: (company || '').replace(/^\?$/, '').trim(), link: (link || '').trim(), salary: (cardSalary || '').trim(), skills: '', jd: '' };
         // scrape details once the job pane/description has rendered
