@@ -194,7 +194,12 @@
   const STORE_KEY = 'autoApplyNaukri';
   let state;
   try { state = JSON.parse(localStorage.getItem(STORE_KEY)) || {}; } catch { state = {}; }
-  if (!Array.isArray(state.seen)) state.seen = [];
+  // Dry and live keep SEPARATE seen-lists. seen is recorded before the apply is even
+  // attempted, so with one shared list every job a dry run walked was permanently
+  // skipped by later live runs — the first live run opened with "16 already seen"
+  // and had to page past inventory it had never actually applied to.
+  const SEEN_KEY = CONFIG.DRY_RUN ? 'seenDry' : 'seen';
+  if (!Array.isArray(state[SEEN_KEY])) state[SEEN_KEY] = [];
   if (typeof state.applied !== 'number') state.applied = 0;
   const saveState = () => localStorage.setItem(STORE_KEY, JSON.stringify(state));
 
@@ -380,7 +385,7 @@
       const link = card.querySelector(SELECTORS.jobTitleLink);
       if (!link) continue;
       const title = link.textContent.replace(/\s+/g, ' ').trim();
-      if (state.seen.includes(link.href)) { nSeen++; continue; }
+      if (state[SEEN_KEY].includes(link.href)) { nSeen++; continue; }
       if (!titleOk(title)) { nFiltered++; continue; }
       job = { href: link.href, title, card };
       break;
@@ -404,7 +409,7 @@
       break;
     }
 
-    state.seen.push(job.href);
+    state[SEEN_KEY].push(job.href);
     saveState();
     log(`▶ Applying: ${job.title} | ${job.href}`);
     job.card.scrollIntoView({ block: 'center' });

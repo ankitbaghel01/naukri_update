@@ -308,7 +308,9 @@ function buildInjection() {
           try {
             const s = JSON.parse(localStorage.getItem(key) || '{}');
             if (s.day !== today) {
-              s.day = today; s.submitted = 0; s.applied = 0; s.seen = (s.seen || []).slice(-2000);
+              s.day = today; s.submitted = 0; s.applied = 0;
+              s.seen = (s.seen || []).slice(-2000);
+              s.seenDry = (s.seenDry || []).slice(-2000); // dry runs keep their own list
               localStorage.setItem(key, JSON.stringify(s));
             }
           } catch (e) {}
