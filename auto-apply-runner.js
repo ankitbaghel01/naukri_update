@@ -15,6 +15,7 @@
 const path = require('path');
 const fs = require('fs');
 const { CV, geminiKey, resumePath: RESUME_PATH } = require('./config'); // personal data from .env
+const { minimizeBrowserWindows } = require('./window-utils');
 const { applyExternal } = require('./external-apply'); // "Apply on company site" jobs, driven from Node
 // stealth patches the fingerprint leaks reCAPTCHA uses to flag automation; falls back to plain playwright
 let chromium;
@@ -34,6 +35,8 @@ process.on('uncaughtException', (e) => console.log(`[${new Date().toLocaleString
 const SITE_ARG = process.argv[2];
 const LOGIN_MODE = process.argv.includes('login');
 const LIVE = process.argv.includes('--live');
+// Leave the browser window on screen instead of minimising it (watch a run live).
+const SHOW_WINDOW = process.argv.includes('--show');
 
 const SITES = {
   indeed: {
@@ -103,7 +106,7 @@ const SITES = {
 
 const site = SITES[SITE_ARG];
 if (!site) {
-  console.log('Usage: node auto-apply-runner.js <indeed|wellfound|naukri> [login|--live]');
+  console.log('Usage: node auto-apply-runner.js <indeed|wellfound|naukri> [login|--live] [--show]');
   process.exit(1);
 }
 
@@ -170,16 +173,36 @@ function buildInjection() {
   }
   const launch = () => chromium.launchPersistentContext(path.join(__dirname, site.profile), {
     channel: 'chrome',
-    headless: false, // bot checks block headless; headed + off-screen instead (same trick as naukri refresh)
+    headless: false, // bot checks block headless; headed + minimised instead (same trick as naukri refresh)
     viewport: { width: 1280, height: 900 },
     args: [
       '--disable-blink-features=AutomationControlled',
-      '--disable-backgrounding-occluded-windows', // keep timers full-speed while off-screen
+      '--disable-backgrounding-occluded-windows', // keep timers full-speed while minimised
       '--disable-renderer-backgrounding',
       '--disable-popup-blocking', // naukri script opens each job in a popup it controls
-      ...(LOGIN_MODE ? [] : ['--window-position=-32000,-32000']),
+      // Force an on-screen origin. Chrome otherwise reuses the bounds saved in the
+      // profile, and this profile still carries the old -32000 position — so the
+      // window would restore off-screen even though it is only minimised now.
+      '--window-position=0,0',
     ],
   });
+
+  // The window used to be parked at -32000,-32000. That hid it, but its taskbar
+  // button then "restored" it to coordinates no monitor covers, so the run could
+  // never be watched. Minimise instead: same out-of-the-way behaviour, but one
+  // click on the taskbar brings it up. Pass --show to leave it on screen.
+  const tuckAway = async (ctx) => {
+    if (LOGIN_MODE || SHOW_WINDOW) return;
+    await new Promise((r) => setTimeout(r, 1200)); // let the window actually exist
+    await minimizeBrowserWindows(path.join(__dirname, site.profile));
+    // The naukri script opens a job popup after the run starts; tuck that away too,
+    // but only these two times — re-minimising on a timer would fight the user the
+    // moment they clicked the taskbar to look.
+    ctx.once('page', async () => {
+      await new Promise((r) => setTimeout(r, 1200));
+      await minimizeBrowserWindows(path.join(__dirname, site.profile));
+    });
+  };
 
   if (LOGIN_MODE) {
     const ctx = await launch();
@@ -299,6 +322,7 @@ function buildInjection() {
   // exhausted, page wedged, crash) — the caller then closes and reopens the browser.
   async function session() {
   const ctx = await launch();
+  await tuckAway(ctx);
   const mainPage = ctx.pages()[0] || (await ctx.newPage());
   searchIdx = 0;
   lastActivity = Date.now();

@@ -17,6 +17,7 @@ const path = require('path');
 const fs = require('fs');
 const { CREDS, naukriProfileUrl, resumePath } = require('./config'); // credentials + profile URL come from .env, never hard-coded
 const { nextHeadline, uploadedToday } = require('./naukri-helpers');
+const { minimizeBrowserWindows } = require('./window-utils');
 
 const PROFILE_URL = naukriProfileUrl;
 const LOGIN_URL = `https://www.naukri.com/nlogin/login?URL=${PROFILE_URL}`;
@@ -29,6 +30,8 @@ const LOGIN_MODE = process.argv[2] === 'login';
 // Re-upload the CV even when the profile already shows today's date — needed when
 // you swap in a different PDF, since the date check alone would skip it.
 const FORCE_CV = process.argv.includes('--force-cv');
+// Leave the browser window on screen instead of minimising it (watch a run live).
+const SHOW_WINDOW = process.argv.includes('--show');
 
 const log = (msg) => {
   const line = `[${new Date().toLocaleString()}] ${msg}`;
@@ -100,13 +103,18 @@ async function googleLogin(ctx, page) {
 (async () => {
   const ctx = await chromium.launchPersistentContext(PROFILE_DIR, {
     channel: 'chrome',
-    headless: false, // naukri's Akamai bot-check blocks headless; off-screen headed instead
+    headless: false, // naukri's Akamai bot-check blocks headless; minimised headed instead
     viewport: { width: 1280, height: 850 },
-    args: [
-      '--disable-blink-features=AutomationControlled',
-      ...(LOGIN_MODE ? [] : ['--window-position=-32000,-32000']),
-    ],
+    // --window-position pins an on-screen origin; the profile still carries the old
+    // -32000 bounds, which would otherwise make a restored window invisible.
+    args: ['--disable-blink-features=AutomationControlled', '--window-position=0,0'],
   });
+  // Minimised rather than parked at -32000,-32000: off-screen made the taskbar
+  // button useless, because "restoring" put the window back where no monitor
+  // reaches. Pass --show to keep it on screen.
+  if (!LOGIN_MODE && !SHOW_WINDOW) {
+    setTimeout(() => { minimizeBrowserWindows(PROFILE_DIR).catch(() => {}); }, 1200);
+  }
   let page = ctx.pages()[0] || (await ctx.newPage());
 
   try {
