@@ -248,6 +248,35 @@ function buildInjection() {
    * Opens its own tab, registered in VERIFY_PAGES so the apply script is not injected
    * into it, and always closes it.
    */
+  /**
+   * Every /jobs/<id>-slug currently listed on the site's applied page.
+   * Best-effort: an empty list simply means no seeding, never a failed run.
+   */
+  async function collectAppliedSlugs(context) {
+    if (!site.appliedListUrl || !context) return [];
+    let page;
+    try {
+      page = await context.newPage();
+      VERIFY_PAGES.add(page);
+      await page.goto(site.appliedListUrl, { waitUntil: 'domcontentloaded', timeout: 45000 });
+      await page.waitForFunction(
+        () => /Ongoing|Archived|No applications/i.test(document.body.innerText),
+        { timeout: 30000 }
+      ).catch(() => {});
+      await page.waitForTimeout(2500);
+      return await page.evaluate(() =>
+        [...new Set([...document.querySelectorAll('a[href*="/jobs/"]')]
+          .map((a) => (a.getAttribute('href') || '').match(/\/jobs\/\d+[^?#]*/))
+          .filter(Boolean).map((m) => m[0]))]
+      );
+    } catch (e) {
+      log(`  (could not read applied list: ${String(e.message || e).split(String.fromCharCode(10))[0].slice(0, 80)})`);
+      return [];
+    } finally {
+      if (page) { VERIFY_PAGES.delete(page); await page.close().catch(() => {}); }
+    }
+  }
+
   async function verifyInAppliedList(job, context) {
     if (!site.appliedListUrl || !job || !context) return 'unknown';
     let page;
@@ -398,6 +427,20 @@ function buildInjection() {
   async function session() {
   const ctx = await launch();
   await tuckAway(ctx);
+
+  // Seed the seen-list from the site's own applied list. The in-page list lives in
+  // localStorage that wellfound's role/job pages do not share across navigations, and
+  // Node's copy resets whenever the browser is reopened — so a restarted run walked
+  // straight back into jobs it had already applied to (observed re-opening the Edmo
+  // job it applied to 20 minutes earlier). Those cost a full cycle each and produce
+  // no application, which then trips the "3 fruitless cycles" restart, which resets
+  // the list again. Seeding from the authoritative list breaks that loop.
+  if (site.appliedListUrl && !LOGIN_MODE) {
+    const before = seenJobs.size;
+    const found = await collectAppliedSlugs(ctx);
+    for (const slug of found) seenJobs.add(slug);
+    if (seenJobs.size > before) log(`Seeded ${seenJobs.size - before} already-applied jobs from ${site.appliedListUrl}`);
+  }
   const mainPage = ctx.pages()[0] || (await ctx.newPage());
   searchIdx = 0;
   lastActivity = Date.now();
