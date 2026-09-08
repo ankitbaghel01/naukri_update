@@ -1,68 +1,95 @@
 /**
- * Keeps the automation browser out of the way WITHOUT making it unreachable.
+ * Keeps the automation browser out of the way.
  *
- * The scripts used to launch Chrome at --window-position=-32000,-32000. That did
- * hide it, but it also broke the taskbar: clicking the button "restored" the window
- * to coordinates no monitor covers, so it could never be brought up to watch the run.
+ * Three states, in increasing order of "get it off my screen":
+ *   --show      leave the window on screen (watch a run happen)
+ *   minimise    sits in the taskbar; one click brings it up
+ *   hide        gone from the screen AND the taskbar; runs invisibly (the default)
  *
- * Instead the window now opens on-screen and is immediately minimised, so it sits in
- * the taskbar like any other window and a click brings it up normally.
+ * The original code launched Chrome at --window-position=-32000,-32000. That hid it,
+ * but it also broke the taskbar: clicking the button "restored" the window to
+ * coordinates no monitor covers, so a run could never be brought up. Windows are now
+ * launched on-screen and then minimised or hidden through ShowWindow, so the state is
+ * a real window state rather than an off-screen position.
  *
- * Only windows belonging to the given Chrome user-data-dir are touched, so a
- * personal Chrome running at the same time is never minimised.
+ * A HIDDEN window cannot be clicked back — nothing appears in the taskbar.
+ * `node show-windows.js` brings it back.
+ *
+ * Windows are enumerated with EnumWindows rather than Process.MainWindowHandle,
+ * because a hidden window reports MainWindowHandle 0 — using it would have made
+ * hiding a one-way trip with no way to restore.
+ *
+ * Only windows belonging to the given Chrome user-data-dir are touched, so a personal
+ * Chrome running at the same time is never affected.
  */
 const { execFile } = require("child_process");
 
 // Embed the path as a PowerShell single-quoted literal. It cannot be passed as a
 // parameter: `powershell -Command <script>` does not bind trailing arguments to a
-// param() block, so the earlier version silently ran with an empty path and matched
+// param() block, so an earlier version silently ran with an empty path and matched
 // nothing (it reported "0 minimised" while the window sat there wide open).
 const psQuote = (s) => "'" + String(s).replace(/'/g, "''") + "'";
 
-const script = (profileDir) => `
+// SW_HIDE 0 | SW_MINIMIZE 6 | SW_RESTORE 9
+const CMD = { hide: 0, minimize: 6, restore: 9 };
+
+const script = (profileDir, mode) => `
 $sig = @'
 using System;
+using System.Collections.Generic;
 using System.Runtime.InteropServices;
 public static class AaWin32 {
+  public delegate bool EnumProc(IntPtr hWnd, IntPtr lParam);
+  [DllImport("user32.dll")] public static extern bool EnumWindows(EnumProc cb, IntPtr lParam);
+  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint pid);
   [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
   [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr hWnd);
+  [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hWnd);
+  [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
+  [DllImport("user32.dll")] public static extern int GetWindowTextLength(IntPtr hWnd);
+
+  public static List<IntPtr> ForPids(HashSet<uint> pids) {
+    var found = new List<IntPtr>();
+    EnumWindows(delegate(IntPtr h, IntPtr l) {
+      uint p; GetWindowThreadProcessId(h, out p);
+      // Chrome owns many hidden helper windows; only ones with a title are real
+      // browser windows worth showing or hiding.
+      if (pids.Contains(p) && GetWindowTextLength(h) > 0) found.Add(h);
+      return true;
+    }, IntPtr.Zero);
+    return found;
+  }
 }
 '@
 Add-Type -TypeDefinition $sig -ErrorAction SilentlyContinue
 $dir = ${psQuote(profileDir)}
-$SW_MINIMIZE = 6
-$n = 0
-$procIds = Get-CimInstance Win32_Process -Filter "Name='chrome.exe'" |
+$cmd = ${CMD[mode]}
+$pids = New-Object 'System.Collections.Generic.HashSet[uint32]'
+Get-CimInstance Win32_Process -Filter "Name='chrome.exe'" |
   Where-Object { $_.CommandLine -like "*$dir*" } |
-  Select-Object -ExpandProperty ProcessId
-foreach ($procId in $procIds) {
-  $proc = Get-Process -Id $procId -ErrorAction SilentlyContinue
-  if ($proc -and $proc.MainWindowHandle -ne 0) {
-    # Never re-minimise a window the user has deliberately restored.
-    if (-not [AaWin32]::IsIconic($proc.MainWindowHandle)) {
-      [void][AaWin32]::ShowWindow($proc.MainWindowHandle, $SW_MINIMIZE)
-      $n++
-    }
+  ForEach-Object { [void]$pids.Add([uint32]$_.ProcessId) }
+$n = 0
+if ($pids.Count -gt 0) {
+  foreach ($h in [AaWin32]::ForPids($pids)) {
+    # Never re-apply a state a window is already in, so this does not fight a user who
+    # has deliberately brought the window up.
+    if ($cmd -eq 6 -and [AaWin32]::IsIconic($h)) { continue }
+    if ($cmd -eq 0 -and -not [AaWin32]::IsWindowVisible($h)) { continue }
+    if ($cmd -eq 9 -and [AaWin32]::IsWindowVisible($h) -and -not [AaWin32]::IsIconic($h)) { continue }
+    [void][AaWin32]::ShowWindow($h, $cmd)
+    if ($cmd -eq 9) { [void][AaWin32]::SetForegroundWindow($h) }
+    $n++
   }
 }
 Write-Output $n
 `;
 
-/**
- * Minimise every Chrome window that belongs to `profileDir`.
- * Windows-only and best-effort: any failure is swallowed, since not being able to
- * tidy the window away must never take down an otherwise healthy run.
- * Already-minimised windows are left alone, so this will not fight a user who has
- * clicked the taskbar to watch what the script is doing.
- *
- * @returns {Promise<number>} how many windows were minimised (0 on any failure)
- */
-function minimizeBrowserWindows(profileDir) {
+function run(profileDir, mode) {
   if (process.platform !== "win32") return Promise.resolve(0);
   return new Promise((resolve) => {
     execFile(
       "powershell.exe",
-      ["-NoProfile", "-NonInteractive", "-Command", script(profileDir)],
+      ["-NoProfile", "-NonInteractive", "-Command", script(profileDir, mode)],
       { timeout: 20000, windowsHide: true },
       (err, stdout) =>
         resolve(err ? 0 : parseInt(String(stdout).trim(), 10) || 0),
@@ -70,4 +97,17 @@ function minimizeBrowserWindows(profileDir) {
   });
 }
 
-module.exports = { minimizeBrowserWindows };
+/** Minimise to the taskbar. Returns how many windows changed (0 on any failure). */
+const minimizeBrowserWindows = (profileDir) => run(profileDir, "minimize");
+
+/** Hide completely — off screen and out of the taskbar. show-windows.js reverses it. */
+const hideBrowserWindows = (profileDir) => run(profileDir, "hide");
+
+/** Bring hidden or minimised windows back and focus them. */
+const restoreBrowserWindows = (profileDir) => run(profileDir, "restore");
+
+module.exports = {
+  minimizeBrowserWindows,
+  hideBrowserWindows,
+  restoreBrowserWindows,
+};

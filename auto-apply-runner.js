@@ -15,7 +15,7 @@
 const path = require('path');
 const fs = require('fs');
 const { CV, geminiKey, resumePath: RESUME_PATH } = require('./config'); // personal data from .env
-const { minimizeBrowserWindows } = require('./window-utils');
+const { minimizeBrowserWindows, hideBrowserWindows } = require('./window-utils');
 const { applyExternal } = require('./external-apply'); // "Apply on company site" jobs, driven from Node
 // stealth patches the fingerprint leaks reCAPTCHA uses to flag automation; falls back to plain playwright
 let chromium;
@@ -35,8 +35,11 @@ process.on('uncaughtException', (e) => console.log(`[${new Date().toLocaleString
 const SITE_ARG = process.argv[2];
 const LOGIN_MODE = process.argv.includes('login');
 const LIVE = process.argv.includes('--live');
-// Leave the browser window on screen instead of minimising it (watch a run live).
+// Window handling: hidden by default (off screen and out of the taskbar, so a run is
+// invisible), --minimize to keep it in the taskbar, --show to leave it on screen.
+// `node show-windows.js` brings a hidden window back.
 const SHOW_WINDOW = process.argv.includes('--show');
+const MINIMIZE_ONLY = process.argv.includes('--minimize');
 
 const SITES = {
   indeed: {
@@ -113,7 +116,7 @@ const SITES = {
 
 const site = SITES[SITE_ARG];
 if (!site) {
-  console.log('Usage: node auto-apply-runner.js <indeed|wellfound|naukri> [login|--live] [--show]');
+  console.log('Usage: node auto-apply-runner.js <indeed|wellfound|naukri> [login|--live] [--show|--minimize]');
   process.exit(1);
 }
 
@@ -205,14 +208,15 @@ function buildInjection() {
   // click on the taskbar brings it up. Pass --show to leave it on screen.
   const tuckAway = async (ctx) => {
     if (LOGIN_MODE || SHOW_WINDOW) return;
+    const stow = MINIMIZE_ONLY ? minimizeBrowserWindows : hideBrowserWindows;
     await new Promise((r) => setTimeout(r, 1200)); // let the window actually exist
-    await minimizeBrowserWindows(path.join(__dirname, site.profile));
+    await stow(path.join(__dirname, site.profile));
     // The naukri script opens a job popup after the run starts; tuck that away too,
     // but only these two times — re-minimising on a timer would fight the user the
     // moment they clicked the taskbar to look.
     ctx.once('page', async () => {
       await new Promise((r) => setTimeout(r, 1200));
-      await minimizeBrowserWindows(path.join(__dirname, site.profile));
+      await stow(path.join(__dirname, site.profile));
     });
   };
 

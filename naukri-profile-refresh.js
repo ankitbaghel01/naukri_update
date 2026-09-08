@@ -17,7 +17,7 @@ const path = require('path');
 const fs = require('fs');
 const { CREDS, naukriProfileUrl, resumePath } = require('./config'); // credentials + profile URL come from .env, never hard-coded
 const { nextHeadline, uploadedToday } = require('./naukri-helpers');
-const { minimizeBrowserWindows } = require('./window-utils');
+const { minimizeBrowserWindows, hideBrowserWindows } = require('./window-utils');
 
 const PROFILE_URL = naukriProfileUrl;
 const LOGIN_URL = `https://www.naukri.com/nlogin/login?URL=${PROFILE_URL}`;
@@ -30,8 +30,10 @@ const LOGIN_MODE = process.argv[2] === 'login';
 // Re-upload the CV even when the profile already shows today's date — needed when
 // you swap in a different PDF, since the date check alone would skip it.
 const FORCE_CV = process.argv.includes('--force-cv');
-// Leave the browser window on screen instead of minimising it (watch a run live).
+// Hidden by default so an hourly run never flashes a window; --minimize keeps it in
+// the taskbar, --show leaves it on screen. `node show-windows.js refresh` brings it back.
 const SHOW_WINDOW = process.argv.includes('--show');
+const MINIMIZE_ONLY = process.argv.includes('--minimize');
 
 const log = (msg) => {
   const line = `[${new Date().toLocaleString()}] ${msg}`;
@@ -113,7 +115,8 @@ async function googleLogin(ctx, page) {
   // button useless, because "restoring" put the window back where no monitor
   // reaches. Pass --show to keep it on screen.
   if (!LOGIN_MODE && !SHOW_WINDOW) {
-    setTimeout(() => { minimizeBrowserWindows(PROFILE_DIR).catch(() => {}); }, 1200);
+    const stow = MINIMIZE_ONLY ? minimizeBrowserWindows : hideBrowserWindows;
+    setTimeout(() => { stow(PROFILE_DIR).catch(() => {}); }, 1200);
   }
   let page = ctx.pages()[0] || (await ctx.newPage());
 
