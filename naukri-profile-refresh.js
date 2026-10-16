@@ -11,6 +11,7 @@
  *
  * Also re-uploads the resume PDF whenever the "Uploaded on" date shown on
  * the profile is not today's date.
+ * Clears the Career Profile preferred annual salary and verifies the saved value.
  */
 const { chromium } = require("playwright-core");
 const path = require("path");
@@ -284,8 +285,33 @@ async function googleLogin(ctx, page) {
       cvMsg = `cv re-uploaded (verified: ${base})`;
     }
 
+    // Close any headline editor left open by verification before editing Career Profile.
+    await page.goto(PROFILE_URL, { waitUntil: "domcontentloaded", timeout: 60000 });
+    const openCareerProfile = async () => {
+      // This widget is lazy-loaded: its pencil does not exist until navigation.
+      await page.getByRole("button", { name: "Career profile", exact: true }).click();
+      const careerEditIcon = page.locator("#lazyDesiredProfile span.edit.icon").first();
+      await careerEditIcon.waitFor({ timeout: 30000 });
+      await careerEditIcon.click();
+      const salary = page.locator('#desiredProfileForm input[aria-label="Preferred annual salary"]');
+      await salary.waitFor({ timeout: 15000 });
+      return salary;
+    };
+
+    const preferredSalary = await openCareerProfile();
+    await preferredSalary.fill("");
+    await page.locator("#desiredProfileForm #saveDesiredProfile").click();
+    await preferredSalary.waitFor({ state: "hidden", timeout: 15000 });
+
+    // Reopen after a server reload: a closing modal alone does not prove persistence.
+    await page.goto(PROFILE_URL, { waitUntil: "domcontentloaded", timeout: 60000 });
+    const savedSalary = await openCareerProfile();
+    if ((await savedSalary.inputValue()).trim() !== "") {
+      throw new Error("Career Profile preferred annual salary did not stay empty after saving");
+    }
+
     log(
-      `OK: headline ${dotMsg} (verified), ${cvMsg} → "${updated.slice(0, 60)}"`,
+      `OK: headline ${dotMsg} (verified), ${cvMsg}, preferred annual salary empty (verified) → "${updated.slice(0, 60)}"`,
     );
   } catch (err) {
     const pages = ctx.pages();
